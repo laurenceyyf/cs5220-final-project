@@ -3,7 +3,6 @@ project(SobelSerial LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
-# Find OpenCV for image loading/saving [cite: 74]
 find_package(OpenCV REQUIRED)
 
 add_executable(sobel_serial main.cpp)
