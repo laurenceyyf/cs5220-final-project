@@ -37,7 +37,8 @@ def main() -> int:
     image = read_u8_image(args.input, args.height, args.width)
 
     # Compute the expected Sobel result with the Python reference.
-    expected = sobel_reference(image)
+    print("CHANGE CHECK OUTPUT TO ALSO GET DIRECTION")
+    expected, _ = sobel_reference(image)
 
     # Load the output produced by the serial / MPI / CUDA program.
     actual = read_f32_image(args.output, args.height, args.width)
