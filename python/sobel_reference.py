@@ -29,7 +29,7 @@ GY = np.array(
 )
 
 
-def sobel_reference(image: np.ndarray) -> np.ndarray:
+def sobel_reference(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     # Convert the input to float so the convolution math is stable.
     image = np.asarray(image, dtype=np.float32)
     if image.ndim != 2:
@@ -38,7 +38,8 @@ def sobel_reference(image: np.ndarray) -> np.ndarray:
     height, width = image.shape
 
     # Start with all zeros. Border pixels stay zero in this reference.
-    output = np.zeros((height, width), dtype=np.float32)
+    magnitude = np.zeros((height-2, width-2), dtype=np.float32)
+    direction = np.zeros((height-2, width-2), dtype=np.float32)
 
     # For each non-border pixel, apply the 3x3 Sobel kernels.
     for row in range(1, height - 1):
@@ -48,9 +49,10 @@ def sobel_reference(image: np.ndarray) -> np.ndarray:
             gy = np.sum(patch * GY)
 
             # Output gradient magnitude.
-            output[row, col] = np.sqrt(gx * gx + gy * gy)
+            magnitude[row-1, col-1] = np.sqrt(gx * gx + gy * gy)
+            direction[row-1, col-1] = np.atan2(gx, gy)
 
-    return output
+    return magnitude, direction
 
 
 def main() -> None:
@@ -66,7 +68,7 @@ def main() -> None:
 
     # Load the input image, run the reference Sobel, and save the result.
     image = read_u8_image(args.input, args.height, args.width)
-    result = sobel_reference(image)
+    result, _ = sobel_reference(image)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
