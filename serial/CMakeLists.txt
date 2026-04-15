@@ -3,9 +3,4 @@ project(SobelSerial LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
-find_package(OpenCV REQUIRED)
-
 add_executable(sobel_serial main.cpp)
-
-target_include_directories(sobel_serial PRIVATE ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(sobel_serial PRIVATE ${OpenCV_LIBS})
