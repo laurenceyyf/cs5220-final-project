@@ -21,9 +21,9 @@ GX = np.array(
 # Standard Sobel kernel for the y direction.
 GY = np.array(
     [
-        [1.0, 2.0, 1.0],
-        [0.0, 0.0, 0.0],
         [-1.0, -2.0, -1.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 2.0, 1.0],
     ],
     dtype=np.float32,
 )
@@ -50,7 +50,7 @@ def sobel_reference(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
             # Output gradient magnitude.
             magnitude[row-1, col-1] = np.sqrt(gx * gx + gy * gy)
-            direction[row-1, col-1] = np.atan2(gx, gy)
+            direction[row-1, col-1] = np.atan2(gy, gx)
 
     return magnitude, direction
 

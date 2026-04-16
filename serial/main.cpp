@@ -17,8 +17,8 @@ void compute_sobel(const uint8_t* input, int width, int height, float* magnitude
         { 1,  2,  1}
     };
 
-    size_t total_pixels = static_cast<size_t>(width) * height;
-    for (size_t i = 0; i < total_pixels; ++i) {
+    size_t magdir_size = static_cast<size_t>(width-2) * (height-2);
+    for (size_t i = 0; i < magdir_size; ++i) {
         magnitude[i] = 0.0f;
         direction[i] = 0.0f;
     }
@@ -36,8 +36,8 @@ void compute_sobel(const uint8_t* input, int width, int height, float* magnitude
                 }
             }
 
-            magnitude[y * width + x] = std::sqrt(sumX * sumX + sumY * sumY);
-            direction[y * width + x] = std::atan2(sumY, sumX);
+            magnitude[(y-1) * (width-2) + (x-1)] = std::sqrt(sumX * sumX + sumY * sumY);
+            direction[(y-1) * (width-2) + (x-1)] = std::atan2(sumY, sumX);
         }
     }
 }
@@ -48,6 +48,8 @@ int main(int argc, char* argv[]) {
     int width = std::stoi(argv[3]);
     int height = std::stoi(argv[4]);
     size_t total_pixels = static_cast<size_t>(width) * height;
+    size_t magdir_size = static_cast<size_t>(width-2) * (height-2);
+
 
     std::ifstream is(input_path, std::ios::binary);
     if (!is) {
@@ -58,8 +60,8 @@ int main(int argc, char* argv[]) {
     is.read(reinterpret_cast<char*>(img_data.data()), total_pixels);
     is.close();
 
-    std::vector<float> magnitude(total_pixels);
-    std::vector<float> direction(total_pixels);
+    std::vector<float> magnitude(magdir_size);
+    std::vector<float> direction(magdir_size);
 
     std::cout << "Processing " << width << "x" << height << " image..." << std::endl;
     compute_sobel(img_data.data(), width, height, magnitude.data(), direction.data());
@@ -69,8 +71,8 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: Could not open output file " << output_path << std::endl;
         return 1;
     }
-    os.write(reinterpret_cast<const char*>(magnitude.data()), total_pixels * sizeof(float));
-    os.write(reinterpret_cast<const char*>(direction.data()), total_pixels * sizeof(float));
+    os.write(reinterpret_cast<const char*>(magnitude.data()), magdir_size * sizeof(float));
+    os.write(reinterpret_cast<const char*>(direction.data()), magdir_size * sizeof(float));
     os.close();
 
     std::cout << "Success. Results stored in " << output_path << std::endl;

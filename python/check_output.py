@@ -16,8 +16,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("to_check", help="Path to outputted .magdir.bin")
     parser.add_argument("reference", help="Path to precaled .magdir.bin")
-    parser.add_argument("width", type=int, default=28, help="Number of images: width")
-    parser.add_argument("height", type=int, default=28, help="Number of images: height")
+    parser.add_argument("width", type=int, default=28, help="pixel widths")
+    parser.add_argument("height", type=int, default=28, help="pixel height")
     parser.add_argument("--atol", type=float, default=1e-4, help="Absolute tolerance")
     parser.add_argument("--rtol", type=float, default=1e-4, help="Relative tolerance")
     parser.add_argument(
@@ -69,13 +69,7 @@ def main() -> int:
         mismatch_indices = np.argwhere(mismatch_mask)
         print(f"CHECK FAILED: {mismatch_indices.shape[0]} mismatched pixels")
 
-        # Print a small sample of mismatches to help debugging.
-        for row, col in mismatch_indices[: args.report_limit]:
-            print(
-                f"  ({row}, {col}) expected={expected[row, col]:.8f} "
-                f"actual={actual[row, col]:.8f} abs_diff={abs_diff[row, col]:.8f}"
-            )
-
+        
         if mismatch_indices.shape[0] > args.report_limit:
             remaining = mismatch_indices.shape[0] - args.report_limit
             print(f"  ... {remaining} more mismatches not shown")
@@ -83,7 +77,7 @@ def main() -> int:
         return False
     compare(reference_dir, to_check_dir, "dir")
     compare(reference_mag, to_check_mag, "mag")
-
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())
