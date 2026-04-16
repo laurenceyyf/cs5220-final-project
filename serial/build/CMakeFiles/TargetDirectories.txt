@@ -1,3 +1,0 @@
-/Users/laurence/Documents/cs5220-final-project/serial/build/CMakeFiles/sobel_serial.dir
-/Users/laurence/Documents/cs5220-final-project/serial/build/CMakeFiles/edit_cache.dir
-/Users/laurence/Documents/cs5220-final-project/serial/build/CMakeFiles/rebuild_cache.dir
