@@ -5,7 +5,6 @@ from pathlib import Path
 
 import numpy as np
 
-from io_utils import read_u8_image, write_f32_image
 
 
 # Standard Sobel kernel for the x direction.
@@ -55,31 +54,3 @@ def sobel_reference(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return magnitude, direction
 
 
-def main() -> None:
-    # Parse command line arguments.
-    parser = argparse.ArgumentParser(
-        description="Compute reference Sobel output for a grayscale uint8 .bin image."
-    )
-    parser.add_argument("--input", required=True, help="Path to input uint8 .bin file")
-    parser.add_argument("--output", required=True, help="Path to output float32 .bin file")
-    parser.add_argument("--width", type=int, default=28, help="Image width")
-    parser.add_argument("--height", type=int, default=28, help="Image height")
-    args = parser.parse_args()
-
-    # Load the input image, run the reference Sobel, and save the result.
-    image = read_u8_image(args.input, args.height, args.width)
-    result, _ = sobel_reference(image)
-
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    write_f32_image(output_path, result)
-
-    # Print a short summary for the user.
-    print(
-        f"Wrote reference Sobel output to {output_path} "
-        f"for image shape ({args.height}, {args.width})"
-    )
-
-
-if __name__ == "__main__":
-    main()

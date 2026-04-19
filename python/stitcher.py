@@ -22,8 +22,8 @@ def stitch_images(data, pixel_rows, pixel_cols, img_dim=28):
     pixel_cols: target width in pixels
     """
     # 1. Calculate necessary grid size
-    grid_rows = np.ceil(pixel_rows / img_dim)
-    grid_cols = np.ceil(pixel_cols / img_dim)
+    grid_rows = int(np.ceil(pixel_rows / img_dim))
+    grid_cols = int(np.ceil(pixel_cols / img_dim))
     n_images = grid_rows * grid_cols
     
     # 2. Grab and reshape subset
