@@ -5,7 +5,6 @@ import sys
 
 import numpy as np
 
-from io_utils import read_f32_image, read_u8_image
 from sobel_reference import sobel_reference
 
 
