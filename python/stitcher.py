@@ -11,36 +11,36 @@ def build_parser() -> argparse.ArgumentParser:
         description="Create stictched image of width * height images and sobel output."
     )
     parser.add_argument("output",  help="Path to program output for uint8 .img.bin and float32 .magdir.bin")
-    parser.add_argument("width",  type=int, default=10, help="Image width")
-    parser.add_argument("height",  type=int, default=10, help="Image height")
+    parser.add_argument("width",  type=int, default=10, help="Image width in pixels")
+    parser.add_argument("height",  type=int, default=10, help="Image height in pixels")
     return parser
 
-def stitch_images(data, grid_rows, grid_cols, img_dim=IMAGE_EDGE_DIM):
+def stitch_images(data, pixel_rows, pixel_cols, img_dim=28):
     """
-    data: np.ndarray of shape (N, 784)
-    grid_rows: how many images tall the result is
-    grid_cols: how many images wide the result is
+    data: np.ndarray of shape (N, img_dim**2)
+    pixel_rows: target height in pixels
+    pixel_cols: target width in pixels
     """
+    # 1. Calculate necessary grid size
+    grid_rows = np.ceil(pixel_rows / img_dim)
+    grid_cols = np.ceil(pixel_cols / img_dim)
     n_images = grid_rows * grid_cols
     
-    # 1. Grab the subset of images and reshape to 2D
-    # Shape: (n_images, 28, 28)
+    # 2. Grab and reshape subset
     rng = np.random.default_rng()
     subset = rng.choice(data, size=n_images, replace=True, axis=0).reshape(n_images, img_dim, img_dim)
-    # 2. Reshape into the grid structure
-    # Shape: (grid_rows, grid_cols, 28, 28)
+    
+    # 3. Reshape into grid structure
     grid = subset.reshape(grid_rows, grid_cols, img_dim, img_dim)
     
-    # 3. Transpose to align rows correctly
-    # We want (grid_rows, img_dim) to be the first two dims to form the vertical axis
-    # and (grid_cols, img_width) to form the horizontal axis.
-    # Current: (0:g_rows, 1:g_cols, 2:img_h, 3:img_w)
-    # Target:  (0:g_rows, 2:img_h, 1:g_cols, 3:img_w)
-    stitched = grid.transpose(0, 2, 1, 3)
+    # 4. Transpose and reshape to create the full image
+    # We transpose to (rows, img_h, cols, img_w) then reshape to merge the dims
+    stitched = grid.transpose(0, 2, 1, 3).reshape(grid_rows * img_dim, grid_cols * img_dim)
     
-    # 4. Flatten back to the requested row-major 1D array
-    # Final shape will be (grid_rows * 28 * grid_cols * 28,)
-    return stitched.ravel()
+    # 5. Crop to the exact pixel dimensions requested
+    cropped = stitched[:pixel_rows, :pixel_cols]
+    
+    return cropped.ravel()
 
 
 
@@ -50,8 +50,10 @@ def main():
     df = df.drop(['label'], axis=1)
     arr = df.to_numpy('uint8')
     stitch_images_arr = stitch_images(arr, args.width, args.height)
-    magnitude, direction = sobel_reference(stitch_images_arr.reshape(IMAGE_EDGE_DIM*args.width, IMAGE_EDGE_DIM*args.height))
+    
+    magnitude, direction = sobel_reference(stitch_images_arr.reshape(args.width, args.height))
     stitch_images_arr.tofile(f"{args.output}_{args.width}_{args.height}.img.bin")
+    
     combined_floats = np.concatenate([magnitude, direction]).astype('float32')
     combined_floats.tofile(f"{args.output}_{args.width}_{args.height}.magdir.bin")
 
