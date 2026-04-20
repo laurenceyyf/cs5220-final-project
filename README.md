@@ -57,7 +57,7 @@ The checker assumes:
 - valid output region: `(height - 2) x (width - 2)`
 - Sobel output: `sqrt(gx^2 + gy^2)`
 
-## One-Command Serial Validation
+## One-Command Validation
 
 Use the helper runner to generate a stitched input image, build the serial
 program, run it, and compare the output against a NumPy reference.
@@ -66,6 +66,12 @@ Example:
 
 ```bash
 ./run_serial_pipeline.sh demo 100 100
+```
+
+For CUDA, use the matching wrapper on a node with a CUDA-capable GPU:
+
+```bash
+./run_cuda_pipeline.sh demo 100 100
 ```
 
 This command creates:
