@@ -1,0 +1,4 @@
+# Dependencies used by the existing Python scripts in `python/` as they are
+# currently written.
+numpy
+pandas
