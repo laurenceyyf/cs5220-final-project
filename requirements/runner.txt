@@ -1,0 +1,2 @@
+# Dependencies for the new one-command serial pipeline runner.
+numpy
