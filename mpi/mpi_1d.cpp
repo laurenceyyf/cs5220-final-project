@@ -47,8 +47,8 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    int width = std::stoi(argv[3]);
-    int height = std::stoi(argv[4]);
+    int height = std::stoi(argv[3]);
+    int width = std::stoi(argv[4]);
 
     int active_ranks = std::min(size, height / MIN_ROWS);
     bool is_active = (rank < active_ranks);

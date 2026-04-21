@@ -39,7 +39,6 @@ def sobel_reference(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     # Start with all zeros. Border pixels stay zero in this reference.
     magnitude = np.zeros((height-2, width-2), dtype=np.float32)
     direction = np.zeros((height-2, width-2), dtype=np.float32)
-
     # For each non-border pixel, apply the 3x3 Sobel kernels.
     for row in range(1, height - 1):
         for col in range(1, width - 1):

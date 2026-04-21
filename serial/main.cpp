@@ -45,8 +45,8 @@ void compute_sobel(const uint8_t* input, int width, int height, float* magnitude
 int main(int argc, char* argv[]) {
     std::string input_path = argv[1];
     std::string output_path = argv[2];
-    int width = std::stoi(argv[3]);
-    int height = std::stoi(argv[4]);
+    int height = std::stoi(argv[3]);
+    int width = std::stoi(argv[4]);
     size_t total_pixels = static_cast<size_t>(width) * height;
     size_t magdir_size = static_cast<size_t>(width-2) * (height-2);
 
