@@ -4,7 +4,7 @@
 #include <cmath>
 #include <string>
 
-void compute_sobel(const uint8_t* input, int width, int height, float* magnitude, float* direction) {
+void compute_sobel(const uint8_t* input, int height, int width, float* magnitude, float* direction) {
     const int Gx[3][3] = {
         {-1, 0, 1},
         {-2, 0, 2},
@@ -50,7 +50,7 @@ int main(int argc, char* argv[]) {
     size_t total_pixels = static_cast<size_t>(width) * height;
     size_t magdir_size = static_cast<size_t>(width-2) * (height-2);
 
-
+    // std::cout << input_path << std::endl;
     std::ifstream is(input_path, std::ios::binary);
     if (!is) {
         std::cerr << "Error: Could not open input file " << input_path << std::endl;
@@ -60,11 +60,18 @@ int main(int argc, char* argv[]) {
     is.read(reinterpret_cast<char*>(img_data.data()), total_pixels);
     is.close();
 
+    // for(int i = 0; i < 4; i++){
+    //     for (int j = 0; j < 9; j++){
+    //         std::cout << static_cast<int>(img_data[i*9 + j]) <<", "; 
+    //     }
+    //     std::cout <<std::endl; 
+    // }
+    
     std::vector<float> magnitude(magdir_size);
     std::vector<float> direction(magdir_size);
 
-    std::cout << "Processing " << width << "x" << height << " image..." << std::endl;
-    compute_sobel(img_data.data(), width, height, magnitude.data(), direction.data());
+    // std::cout << "Processing h:" << height << " w:" << width << " image..." << std::endl;
+    compute_sobel(img_data.data(), height, width, magnitude.data(), direction.data());
 
     std::ofstream os(output_path, std::ios::binary);
     if (!os) {
