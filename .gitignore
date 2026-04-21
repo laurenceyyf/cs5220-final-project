@@ -3,5 +3,7 @@
 *$py.class
 
 *.bin
+**/build
 
-**/build/
+data/
+data
