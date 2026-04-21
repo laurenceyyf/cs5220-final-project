@@ -22,19 +22,19 @@ void sobel(const uint8_t *local_in, int w,
         {
             int img_idx = y * w + x;
 
-            int32_t sx_int =
+            int32_t sx =
                 -local_in[img_idx - w - 1] + local_in[img_idx - w + 1] 
                 - 2 * local_in[img_idx - 1] + 2 * local_in[img_idx + 1] 
                 - local_in[img_idx + w - 1] + local_in[img_idx + w + 1];
 
-            int32_t sy_int =
+            int32_t sy =
                 -local_in[img_idx - w - 1] - 2 * local_in[img_idx - w] - local_in[img_idx - w + 1] 
                 + local_in[img_idx + w - 1] + 2 * local_in[img_idx + w] + local_in[img_idx + w + 1];
 
             int magdir_idx = (y - 1) * (w - 2) + (x - 1);
 
-            mag[magdir_idx] = std::sqrt(static_cast<float>(sx_int * sx_int + sy_int * sy_int));
-            dir[magdir_idx] = std::atan2(static_cast<float>(sy_int), static_cast<float>(sx_int));
+            mag[magdir_idx] = std::sqrt(static_cast<float>(sx * sx + sy * sy));
+            dir[magdir_idx] = std::atan2(static_cast<float>(sy), static_cast<float>(sx));
         }
     }
 }
@@ -63,6 +63,7 @@ int main(int argc, char **argv)
         my_rows = base_rows + (rank < remainder ? 1 : 0);
         start_row = rank * base_rows + std::min(rank, remainder);
     }
+    // std::cout << "mr " << my_rows << " sr " << start_row << " width " << width << std::endl;
 
     // Halo buffer: my_rows data rows + 1 ghost row above + 1 ghost row below
     int local_h = is_active ? (my_rows + 2) : 0;
@@ -160,7 +161,7 @@ int main(int argc, char **argv)
         MPI_File_write_at(fh, file_offset,
                           mag_ptr, writeout_count,
                           MPI_FLOAT, MPI_STATUS_IGNORE);
-        MPI_File_write_at(fh, file_offset + static_cast<MPI_Offset>(out_w) * (height - 2)*sizeof(float) ,
+        MPI_File_write_at(fh, file_offset + static_cast<MPI_Offset>(out_w) * (height-2)*sizeof(float) ,
                           dir_ptr, writeout_count,
                           MPI_FLOAT, MPI_STATUS_IGNORE);
     }
