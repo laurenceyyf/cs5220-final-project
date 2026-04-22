@@ -21,10 +21,14 @@ For Fashion-MNIST, the default shape is `28 x 28`.
 
 ### Output image (`float32`)
 
-- Sobel gradient magnitude
+The current serial implementation writes one `.magdir.bin` file with two
+back-to-back arrays:
+
+- Sobel gradient magnitude for the inner region
+- Sobel gradient direction for the inner region
 - Row-major layout
-- Shape matches the input image
-- File contents are exactly `height * width * 4` bytes
+- Each array has shape `(height - 2) x (width - 2)`
+- Total file contents are exactly `2 * (height - 2) * (width - 2) * 4` bytes
 
 ## Python Utilities
 
@@ -49,8 +53,32 @@ The checker assumes:
 
 - input dtype: `uint8`
 - output dtype: `float32`
-- border handling: border pixels are set to `0`
+- output layout: `[magnitude][direction]`
+- valid output region: `(height - 2) x (width - 2)`
 - Sobel output: `sqrt(gx^2 + gy^2)`
+
+## One-Command Serial Validation
+
+Use the helper runner to generate a stitched input image, build the serial
+program, run it, and compare the output against a NumPy reference.
+
+Example:
+
+```bash
+./run_serial_pipeline.sh demo 100 100
+```
+
+This command creates:
+
+- `data/serial_pipeline/demo_100x100.img.bin`
+- `data/serial_pipeline/demo_100x100.reference.magdir.bin`
+- `data/serial_pipeline/demo_100x100.serial.magdir.bin`
+
+Useful options:
+
+- `--seed 0`: fix the random stitched image for reproducible runs
+- `--skip-build`: reuse an existing `serial/build/sobel_serial`
+- `--output-dir PATH`: write artifacts into a different directory
 
 ## Exporting Fashion-MNIST
 
