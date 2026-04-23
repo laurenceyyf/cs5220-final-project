@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end serial Sobel validation runner."""
+"""End-to-end Sobel validation runner."""
 
 import argparse
 import math
@@ -12,11 +12,23 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CSV_PATH = REPO_ROOT / "python" / "fashion-mnist_test.csv"
-SERIAL_SOURCE_DIR = REPO_ROOT / "serial"
-SERIAL_BUILD_DIR = SERIAL_SOURCE_DIR / "build"
-SERIAL_BINARY = SERIAL_BUILD_DIR / "sobel_serial"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "data" / "serial_pipeline"
 IMAGE_EDGE_DIM = 28
+
+BACKEND_CONFIG = {
+    "serial": {
+        "source_dir": REPO_ROOT / "serial",
+        "build_dir": REPO_ROOT / "serial" / "build",
+        "binary": REPO_ROOT / "serial" / "build" / "sobel_serial",
+        "output_suffix": "serial",
+    },
+    "cuda": {
+        "source_dir": REPO_ROOT / "cuda",
+        "build_dir": REPO_ROOT / "cuda" / "build",
+        "binary": REPO_ROOT / "cuda" / "build" / "sobel_cuda",
+        "output_suffix": "cuda",
+    },
+}
 
 GX = np.array(
     [
@@ -47,6 +59,12 @@ def build_parser():
     parser.add_argument("prefix", help="File prefix for generated artifacts")
     parser.add_argument("width", type=int, help="Input image width in pixels")
     parser.add_argument("height", type=int, help="Input image height in pixels")
+    parser.add_argument(
+        "--backend",
+        choices=sorted(BACKEND_CONFIG),
+        default="serial",
+        help="Implementation to build and validate",
+    )
     parser.add_argument(
         "--seed",
         type=int,
@@ -86,7 +104,12 @@ def build_parser():
 def run_command(cmd, cwd=None):
     # Print every external command so runs are easy to inspect and debug.
     print("+", " ".join(cmd))
-    subprocess.run(cmd, cwd=str(cwd) if cwd is not None else None, check=True)
+    try:
+        subprocess.run(cmd, cwd=str(cwd) if cwd is not None else None, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "Command failed with exit code {}: {}".format(exc.returncode, " ".join(cmd))
+        )
 
 
 def load_dataset_pixels(csv_path):
@@ -165,75 +188,88 @@ def compare_arrays(expected, actual, label, atol, rtol):
     return passed
 
 
-def ensure_serial_binary(skip_build):
+def ensure_backend_binary(config, skip_build):
+    binary_path = config["binary"]
+    build_dir = config["build_dir"]
+    source_dir = config["source_dir"]
+
     if skip_build:
-        if not SERIAL_BINARY.exists():
+        if not binary_path.exists():
             raise FileNotFoundError(
-                "Serial binary not found at {}. Remove --skip-build or build it first.".format(
-                    SERIAL_BINARY
+                "Binary not found at {}. Remove --skip-build or build it first.".format(
+                    binary_path
                 )
             )
         return
 
-    # Configure and build the serial target if the caller did not opt out.
-    SERIAL_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    # Configure and build the selected target if the caller did not opt out.
+    build_dir.mkdir(parents=True, exist_ok=True)
     run_command(
-        ["cmake", "-S", str(SERIAL_SOURCE_DIR), "-B", str(SERIAL_BUILD_DIR)],
+        ["cmake", "-S", str(source_dir), "-B", str(build_dir)],
         cwd=REPO_ROOT,
     )
-    run_command(["cmake", "--build", str(SERIAL_BUILD_DIR)], cwd=REPO_ROOT)
+    run_command(["cmake", "--build", str(build_dir)], cwd=REPO_ROOT)
 
 
 def main():
-    args = build_parser().parse_args()
+    try:
+        args = build_parser().parse_args()
 
-    if args.width < 3 or args.height < 3:
-        raise ValueError("width and height must both be at least 3")
+        if args.width < 3 or args.height < 3:
+            raise ValueError("width and height must both be at least 3")
 
-    csv_path = Path(args.csv).resolve()
-    output_dir = Path(args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+        config = BACKEND_CONFIG[args.backend]
+        csv_path = Path(args.csv).resolve()
+        output_dir = Path(args.output_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    stem = "{}_{}x{}".format(args.prefix, args.width, args.height)
-    input_path = output_dir / (stem + ".img.bin")
-    reference_path = output_dir / (stem + ".reference.magdir.bin")
-    serial_output_path = output_dir / (stem + ".serial.magdir.bin")
+        stem = "{}_{}x{}".format(args.prefix, args.width, args.height)
+        input_path = output_dir / (stem + ".img.bin")
+        reference_path = output_dir / (stem + ".reference.magdir.bin")
+        backend_output_path = output_dir / (
+            stem + "." + config["output_suffix"] + ".magdir.bin"
+        )
 
-    # Generate both the binary test input and the Python reference output.
-    pixels = load_dataset_pixels(csv_path)
-    image = stitch_images(pixels, args.width, args.height, args.seed)
-    magnitude, direction = sobel_reference(image)
+        # Generate both the binary test input and the Python reference output.
+        pixels = load_dataset_pixels(csv_path)
+        image = stitch_images(pixels, args.width, args.height, args.seed)
+        magnitude, direction = sobel_reference(image)
 
-    image.tofile(str(input_path))
-    np.concatenate([magnitude.ravel(), direction.ravel()]).astype(np.float32).tofile(
-        str(reference_path)
-    )
+        image.tofile(str(input_path))
+        np.concatenate([magnitude.ravel(), direction.ravel()]).astype(np.float32).tofile(
+            str(reference_path)
+        )
 
-    ensure_serial_binary(args.skip_build)
-    # Run the C++ serial implementation with the same input image.
-    run_command(
-        [
-            str(SERIAL_BINARY),
-            str(input_path),
-            str(serial_output_path),
-            str(args.width),
-            str(args.height),
-        ],
-        cwd=REPO_ROOT,
-    )
+        ensure_backend_binary(config, args.skip_build)
+        # Run the selected C++/CUDA implementation with the same input image.
+        run_command(
+            [
+                str(config["binary"]),
+                str(input_path),
+                str(backend_output_path),
+                str(args.width),
+                str(args.height),
+            ],
+            cwd=REPO_ROOT,
+        )
 
-    reference_mag, reference_dir = read_magdir(reference_path, args.width, args.height)
-    serial_mag, serial_dir = read_magdir(serial_output_path, args.width, args.height)
+        reference_mag, reference_dir = read_magdir(reference_path, args.width, args.height)
+        backend_mag, backend_dir = read_magdir(
+            backend_output_path, args.width, args.height
+        )
 
-    # Compare magnitude and direction separately to make failures easier to read.
-    mag_ok = compare_arrays(reference_mag, serial_mag, "magnitude", args.atol, args.rtol)
-    dir_ok = compare_arrays(reference_dir, serial_dir, "direction", args.atol, args.rtol)
+        # Compare magnitude and direction separately to make failures easier to read.
+        mag_ok = compare_arrays(reference_mag, backend_mag, "magnitude", args.atol, args.rtol)
+        dir_ok = compare_arrays(reference_dir, backend_dir, "direction", args.atol, args.rtol)
 
-    print("input image: {}".format(input_path))
-    print("reference output: {}".format(reference_path))
-    print("serial output: {}".format(serial_output_path))
+        print("input image: {}".format(input_path))
+        print("reference output: {}".format(reference_path))
+        print("{} output: {}".format(args.backend, backend_output_path))
 
-    return 0 if mag_ok and dir_ok else 1
+        return 0 if mag_ok and dir_ok else 1
+    except Exception as exc:
+        print("Error: {}".format(exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -57,7 +57,7 @@ The checker assumes:
 - valid output region: `(height - 2) x (width - 2)`
 - Sobel output: `sqrt(gx^2 + gy^2)`
 
-## One-Command Serial Validation
+## One-Command Validation
 
 Use the helper runner to generate a stitched input image, build the serial
 program, run it, and compare the output against a NumPy reference.
@@ -66,6 +66,12 @@ Example:
 
 ```bash
 ./run_serial_pipeline.sh demo 100 100
+```
+
+For CUDA, use the matching wrapper on a node with a CUDA-capable GPU:
+
+```bash
+./run_cuda_pipeline.sh demo 100 100
 ```
 
 This command creates:
@@ -79,6 +85,61 @@ Useful options:
 - `--seed 0`: fix the random stitched image for reproducible runs
 - `--skip-build`: reuse an existing `serial/build/sobel_serial`
 - `--output-dir PATH`: write artifacts into a different directory
+
+## CUDA Benchmarking
+
+The CUDA executable also accepts benchmark-oriented options without changing the
+default validation command:
+
+```bash
+cuda/build/sobel_cuda \
+  --block 16x16 \
+  --warmup 1 \
+  --repeats 5 \
+  --csv data/cuda_benchmark/demo.cuda.csv \
+  --no-output-write \
+  data/cuda_benchmark/demo.img.bin \
+  data/cuda_benchmark/demo.out.bin \
+  4096 \
+  4096
+```
+
+Use the sweep helper to generate a deterministic grayscale input, run several
+CUDA block shapes, and write one CSV for plotting:
+
+```bash
+python3 tools/cuda_profile_sweep.py \
+  --width 4096 \
+  --height 4096 \
+  --repeats 5 \
+  --warmup 1
+```
+
+For pure kernel timing, add `--kernel-only`; otherwise the CSV includes H2D,
+kernel, and D2H timing. Plot the CSV with:
+
+```bash
+python3 tools/plot_cuda_benchmark.py data/cuda_benchmark/cuda_sobel_4096x4096.cuda.csv
+```
+
+For CUDA strong scaling, keep the input size and block shape fixed while
+varying the number of GPUs:
+
+```bash
+python3 tools/cuda_profile_sweep.py \
+  --width 32768 \
+  --height 32768 \
+  --gpus 1 2 4 \
+  --block 16x16 \
+  --repeats 5 \
+  --warmup 1 \
+  --kernel-only \
+  --csv data/cuda_benchmark/cuda_sobel_32768x32768.multi_gpu.csv
+```
+
+The plotting helper groups multi-GPU CSVs by `num_gpus`, uses a log2 x-axis for
+strong scaling plots, and includes an ideal baseline in the speedup plot when
+Matplotlib is available.
 
 ## Exporting Fashion-MNIST
 

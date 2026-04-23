@@ -6,7 +6,6 @@ set(CMAKE_CUDA_STANDARD 17)
 
 set(CMAKE_CUDA_ARCHITECTURES 80)
 
-find_package(OpenCV REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
 add_executable(sobel_cuda 
@@ -15,7 +14,6 @@ add_executable(sobel_cuda
 )
 
 target_link_libraries(sobel_cuda PRIVATE 
-    ${OpenCV_LIBS} 
     CUDA::cudart
 )
 
