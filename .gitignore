@@ -7,3 +7,5 @@
 
 data/
 data
+
+mpi/*_out/

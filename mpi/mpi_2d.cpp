@@ -42,7 +42,12 @@ static inline int LI(int y, int x, int local_w) { return y * local_w + x; }
 int main(int argc, char **argv)
 {
     MPI_Init(&argc, &argv);
+    constexpr int NUM_SECTIONS = 8;
+    double times[NUM_SECTIONS]; 
 
+    MPI_Barrier(MPI_COMM_WORLD);
+    double t_total_start = MPI_Wtime(); 
+    
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
@@ -76,10 +81,12 @@ int main(int argc, char **argv)
     MPI_Comm_split(MPI_COMM_WORLD, is_active ? 0 : MPI_UNDEFINED, rank, &active_comm);
 
     int coords[2] = {0, 0};
+    int cart_rank;
     if (is_active)
     {
         MPI_Cart_create(active_comm, 2, dims, periods, 0, &cart_comm);
-        MPI_Cart_coords(cart_comm, rank, 2, coords);
+        MPI_Comm_rank(cart_comm, &cart_rank);
+        MPI_Cart_coords(cart_comm, cart_rank, 2, coords);
     }
 
     ////////////////////////////////////////
@@ -114,10 +121,12 @@ int main(int argc, char **argv)
     std::vector<float> mag(local_magdir_size);//, NAN);
     std::vector<float> dir(local_magdir_size);//, NAN);
 
+    times[0] = MPI_Wtime() - t_total_start; 
     ////////////////////////////////////////
     // 4. MPI-IO: read this rank's tile from the raw image file.
     ////////////////////////////////////////
     
+    double t_read_start = MPI_Wtime(); 
     MPI_File fh;
     MPI_File_open(cart_comm, argv[1], MPI_MODE_RDONLY, MPI_INFO_NULL, &fh);
 
@@ -152,6 +161,9 @@ int main(int argc, char **argv)
     }
     MPI_File_close(&fh);
 
+    times[1] = MPI_Wtime() - t_read_start; 
+    
+    double t_send_start = MPI_Wtime(); 
     // std::ofstream out("../data/local_in.bin", std::ios::binary);
     // out.write(
     //     reinterpret_cast<const char*>(local_in.data()),
@@ -253,25 +265,35 @@ int main(int argc, char **argv)
             MPI_Isend(&local_in[LI(my_rows, my_cols, local_w)], 1, MPI_UINT8_T,
                       se, TAG_NW2SE, cart_comm, &reqs[n_reqs++]);
         }
+    }
+    
+    times[2] = MPI_Wtime() - t_send_start; 
 
-        ////////////////////////////////////////
-        // 7. Compute interior rows/cols while messages in flight
-        ////////////////////////////////////////
+    double t_local_comp_start = MPI_Wtime(); 
+    ////////////////////////////////////////
+    // 7. Compute interior rows/cols while messages in flight
+    ////////////////////////////////////////
+    if(is_active){
         if (my_rows > 2 && my_cols > 2)
             sobel(local_in.data(), local_w,
                 mag.data(), dir.data(), 
                 2, my_rows,
                 2, my_cols);
     }
-
+    times[3] = MPI_Wtime() - t_local_comp_start; 
     
+
+
+
     ////////////////////////////////////////
     // 8. Compute boundary 
     ////////////////////////////////////////    
-    
     // Wait for all halo messages before touching any boundary row/col
+    double t_wait_start = MPI_Wtime(); 
     MPI_Waitall(n_reqs, reqs, MPI_STATUSES_IGNORE);
-    
+    times[4] = MPI_Wtime() - t_wait_start; 
+
+    double t_halo_comp_start = MPI_Wtime(); 
     if (is_active)
     {
         int up, down, left, right;
@@ -339,6 +361,7 @@ int main(int argc, char **argv)
         MPI_Type_free(&col_type);
     }
 
+    times[5] = MPI_Wtime() - t_halo_comp_start; 
     ////////////////////////////////////////
     // 9. MPI-IO write
     ////////////////////////////////////////
@@ -356,6 +379,7 @@ int main(int argc, char **argv)
     //     }
     // }   
 
+    double t_write_start = MPI_Wtime(); 
     MPI_File_open(cart_comm, argv[2],
                   MPI_MODE_CREATE | MPI_MODE_WRONLY,
                   MPI_INFO_NULL, &fh);
@@ -411,9 +435,43 @@ int main(int argc, char **argv)
     }
 
     MPI_File_close(&fh);
+    times[6] = MPI_Wtime() - t_write_start; 
 
     if (cart_comm != MPI_COMM_NULL) MPI_Comm_free(&cart_comm);
     if (active_comm != MPI_COMM_NULL) MPI_Comm_free(&active_comm);
+    
+    MPI_Barrier(MPI_COMM_WORLD);
+    times[7] = MPI_Wtime() - t_total_start; 
+    MPI_Comm final_comm;
+    MPI_Comm_split(MPI_COMM_WORLD, is_active ? 0 : MPI_UNDEFINED, rank, &final_comm);
+
+    if (is_active)
+    {
+        int active_size;
+        MPI_Comm_size(final_comm, &active_size);
+
+        double t_min[NUM_SECTIONS], t_max[NUM_SECTIONS], t_sum[NUM_SECTIONS];
+
+        MPI_Reduce(times, t_min, NUM_SECTIONS, MPI_DOUBLE, MPI_MIN, 0, final_comm);
+        MPI_Reduce(times, t_max, NUM_SECTIONS, MPI_DOUBLE, MPI_MAX, 0, final_comm);
+        MPI_Reduce(times, t_sum, NUM_SECTIONS, MPI_DOUBLE, MPI_SUM, 0, final_comm);
+        int active_rank;
+        MPI_Comm_rank(final_comm, &active_rank);
+
+        if (active_rank == 0)
+        {
+            const char *names[] = {
+                "Setup", "Read file", "Send requests", "Local comp",
+                "Wait on resps", "Compute received", "Write out", "Total"};
+            printf("%-20s;%10s;%10s;%10s\n", "Section", "Min(s)", "Max(s)", "Avg(s)");
+            for (int i = 0; i < NUM_SECTIONS; i++)
+            {
+                printf("%-20s;%10.6f;%10.6f;%10.6f\n",
+                       names[i], t_min[i], t_max[i], t_sum[i] / active_size);
+            }
+        }
+        MPI_Comm_free(&final_comm);
+    }
 
     MPI_Finalize();
 }
