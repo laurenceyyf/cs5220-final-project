@@ -72,7 +72,7 @@ def main():
     print('generating image')
     stitch_images_arr = stitch_images(arr, args.height, args.width)
     print('writing image')
-    # stitch_images_arr.tofile(f"{args.output}_{args.height}_{args.width}.img.bin")
+    stitch_images_arr.tofile(f"{args.output}_{args.height}_{args.width}.img.bin")
     
     print('running sobel')
     magnitude, direction = sobel_vectorized(stitch_images_arr.reshape(args.height, args.width))
@@ -83,7 +83,7 @@ def main():
 
     print('writing output')
     combined_floats = np.concatenate([magnitude, direction]).astype('float32')
-    # combined_floats.tofile(f"{args.output}_{args.height}_{args.width}.magdir.bin")
+    combined_floats.tofile(f"{args.output}_{args.height}_{args.width}.magdir.bin")
 
 if __name__ == "__main__": 
     main()
