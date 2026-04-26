@@ -152,53 +152,77 @@ int main(int argc, char **argv)
     }
     times[5] = MPI_Wtime() - t_halo_comp_start;
 
+    /*
+     * PSCRATCH-friendly setup:
+     * uses active_comm instead of MPI_COMM_WORLD
+     * uses collective writes: MPI_File_write_at_all
+     * fixes the local row count to use my_rows
+     * passes an MPI_Info object into MPI_File_open with ROMIO/Lustre-style hints:
+     * romio_cb_write=enable
+     * romio_ds_write=disable
+     * cb_nodes=8
+     * cb_buffer_size=16777216
+     * striping_factor=8
+     * striping_unit=4194304
+     * plus access_style / collective_buffering
+     */
+    MPI_Comm active_comm;
+    MPI_Comm_split(MPI_COMM_WORLD, is_active ? 0 : MPI_UNDEFINED, rank, &active_comm);
+
     double t_write_start = MPI_Wtime();
     // WRITE
-    MPI_File_open(MPI_COMM_WORLD, argv[2],
-                  MPI_MODE_CREATE | MPI_MODE_WRONLY,
-                  MPI_INFO_NULL, &fh);
-
     if (is_active)
     {
+        MPI_Info write_info;
+        MPI_Info_create(&write_info);
+
+        // Hints that are often helpful for ROMIO on Lustre-backed scratch.
+        MPI_Info_set(write_info, "access_style", "write_once,random");
+        MPI_Info_set(write_info, "collective_buffering", "true");
+        MPI_Info_set(write_info, "romio_cb_write", "enable");
+        MPI_Info_set(write_info, "romio_ds_write", "disable");
+        MPI_Info_set(write_info, "cb_nodes", "8");
+        MPI_Info_set(write_info, "cb_buffer_size", "16777216");
+        MPI_Info_set(write_info, "striping_factor", "8");
+        MPI_Info_set(write_info, "striping_unit", "4194304");
+
+        MPI_File_open(active_comm, argv[2],
+                      MPI_MODE_CREATE | MPI_MODE_WRONLY,
+                      write_info, &fh);
+        MPI_Info_free(&write_info);
 
         bool is_last = (rank + 1 == active_ranks);
         bool is_first = (rank == 0);
 
         int out_w = width - 2;
-        int out_h = base_rows;
+        int out_h = my_rows;
         if (is_first)
             out_h -= 1;
         if (is_last)
             out_h -= 1;
-        // std::cout << out_w << ", " << out_h << "\n";
-        size_t writeout_count = (size_t)out_h * out_w;
-        // std::cout << writeout_count << "\n";
+        int writeout_count = out_h * out_w;
 
         int file_offset_row = start_row;
         if (!is_first)
             file_offset_row -= 1;
-        size_t file_offset = (size_t)file_offset_row * out_w * sizeof(float);
-        // std::cout << file_offset_row * out_w << "\n";
+        MPI_Offset file_offset = static_cast<MPI_Offset>(file_offset_row) * out_w * sizeof(float);
 
         float *mag_ptr = mag.data() + (is_first ? out_w : 0);
         float *dir_ptr = dir.data() + (is_first ? out_w : 0);
-        // std::cout << mag.size() << "; " << out_w * base_rows << "\n";
-        // std::cout << (is_first ? out_w: 0) << std::endl;
+        MPI_Offset plane_size = static_cast<MPI_Offset>(height - 2) * out_w * sizeof(float);
 
-        MPI_File_write_at(fh, file_offset,
-                          mag_ptr, writeout_count,
-                          MPI_FLOAT, MPI_STATUS_IGNORE);
-        MPI_File_write_at(fh, file_offset + static_cast<MPI_Offset>(out_w) * (height - 2) * sizeof(float),
-                          dir_ptr, writeout_count,
-                          MPI_FLOAT, MPI_STATUS_IGNORE);
+        MPI_File_set_size(fh, 2 * plane_size);
+        MPI_File_write_at_all(fh, file_offset,
+                              mag_ptr, writeout_count,
+                              MPI_FLOAT, MPI_STATUS_IGNORE);
+        MPI_File_write_at_all(fh, file_offset + plane_size,
+                              dir_ptr, writeout_count,
+                              MPI_FLOAT, MPI_STATUS_IGNORE);
+        MPI_File_close(&fh);
     }
-    MPI_File_close(&fh);
     times[6] = MPI_Wtime() - t_write_start;
     MPI_Barrier(MPI_COMM_WORLD);
     times[7] = MPI_Wtime() - t_total_start;
-
-    MPI_Comm active_comm;
-    MPI_Comm_split(MPI_COMM_WORLD, is_active ? 0 : MPI_UNDEFINED, rank, &active_comm);
 
     if (is_active)
     {
