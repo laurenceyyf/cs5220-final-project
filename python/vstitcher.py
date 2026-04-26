@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import argparse
 from sobel_reference import sobel_reference
+from scipy.signal import convolve2d
 
 IMAGE_EDGE_DIM = 28
 
@@ -23,14 +24,14 @@ def sobel_vectorized(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         [-1, 0, 1], 
         [-2, 0, 2], 
         [-1, 0, 1]], dtype=np.float32)
-    GY = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.float32)
+    GY = np.array([
+        [-1, -2, -1], 
+        [0, 0, 0], 
+        [1, 2, 1]], dtype=np.float32)
 
-    # Use Scipy's convolution (much faster than manual loops)
-    from scipy.signal import convolve2d
-    
-    # 'valid' mode automatically handles the (height-2, width-2) requirement
-    gx = convolve2d(image, GX, mode='valid')
-    gy = convolve2d(image, GY, mode='valid')
+    # valid + flip to work with convolve 2d
+    gx = convolve2d(image, np.flip(GX), mode='valid')
+    gy = convolve2d(image, np.flip(GY), mode='valid')
 
     magnitude = np.sqrt(gx**2 + gy**2)
     direction = np.arctan2(gy, gx)
@@ -44,7 +45,6 @@ def stitch_images(data, pixel_height, pixel_width, img_dim=28):
     pixel_height: target height in pixels
     pixel_width: target width in pixels
     """
-
     grid_rows = int(np.ceil(pixel_height / img_dim))
     grid_cols = int(np.ceil(pixel_width / img_dim))
     n_images = grid_rows * grid_cols
