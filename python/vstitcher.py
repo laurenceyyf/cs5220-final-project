@@ -10,7 +10,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create stictched image of height * width images and sobel output."
     )
-    # parser.add_argument("output",  help="Path to program output for uint8 .img.bin and float32 .magdir.bin")
+    parser.add_argument("output",  help="Path to program output for uint8 .img.bin and float32 .magdir.bin")
     parser.add_argument("height",  type=int, default=10, help="Image height in pixels")
     parser.add_argument("width",  type=int, default=10, help="Image width in pixels")
     return parser
