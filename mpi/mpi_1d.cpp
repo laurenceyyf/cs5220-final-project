@@ -2,6 +2,7 @@
 #include <vector>
 #include <cmath>
 #include <iostream>
+#include <immintrin.h>
 
 #define MIN_ROWS 3
 
@@ -12,13 +13,59 @@ constexpr int Gy[3][3] = {
 
 // Compute sobel over [y_start, y_end) in the local tile.
 // magdir offsets need to account for fact we have extra rows and missing 2 cols.
+static inline __m256i load_u8x8_to_i32(const uint8_t *ptr)
+{
+    return _mm256_cvtepu8_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i *>(ptr)));
+}
+
 void sobel(const uint8_t *local_in, int w,
            float *mag, float *dir,
            int y_start, int y_end)
 {
     for (int y = y_start; y < y_end; ++y)
     {
-        for (int x = 1; x < w - 1; ++x)
+        int x = 1;
+        for (; x <= w - 9; x += 8)
+        {
+            int img_idx = y * w + x;
+
+            __m256i top_l = load_u8x8_to_i32(local_in + img_idx - w - 1);
+            __m256i top_c = load_u8x8_to_i32(local_in + img_idx - w);
+            __m256i top_r = load_u8x8_to_i32(local_in + img_idx - w + 1);
+            __m256i mid_l = load_u8x8_to_i32(local_in + img_idx - 1);
+            __m256i mid_r = load_u8x8_to_i32(local_in + img_idx + 1);
+            __m256i bot_l = load_u8x8_to_i32(local_in + img_idx + w - 1);
+            __m256i bot_c = load_u8x8_to_i32(local_in + img_idx + w);
+            __m256i bot_r = load_u8x8_to_i32(local_in + img_idx + w + 1);
+
+            __m256i sx_i = _mm256_sub_epi32(top_r, top_l);
+            sx_i = _mm256_add_epi32(sx_i, _mm256_slli_epi32(_mm256_sub_epi32(mid_r, mid_l), 1));
+            sx_i = _mm256_add_epi32(sx_i, _mm256_sub_epi32(bot_r, bot_l));
+
+            __m256i sy_i = _mm256_sub_epi32(bot_l, top_l);
+            sy_i = _mm256_sub_epi32(sy_i, _mm256_slli_epi32(top_c, 1));
+            sy_i = _mm256_sub_epi32(sy_i, top_r);
+            sy_i = _mm256_add_epi32(sy_i, _mm256_slli_epi32(bot_c, 1));
+            sy_i = _mm256_add_epi32(sy_i, bot_r);
+
+            __m256 sx = _mm256_cvtepi32_ps(sx_i);
+            __m256 sy = _mm256_cvtepi32_ps(sy_i);
+            __m256 mag_v = _mm256_sqrt_ps(_mm256_add_ps(_mm256_mul_ps(sx, sx), _mm256_mul_ps(sy, sy)));
+
+            int magdir_idx = (y - 1) * (w - 2) + (x - 1);
+            _mm256_storeu_ps(mag + magdir_idx, mag_v);
+
+            alignas(32) float sx_arr[8];
+            alignas(32) float sy_arr[8];
+            _mm256_store_ps(sx_arr, sx);
+            _mm256_store_ps(sy_arr, sy);
+            for (int lane = 0; lane < 8; ++lane)
+            {
+                dir[magdir_idx + lane] = std::atan2(sy_arr[lane], sx_arr[lane]);
+            }
+        }
+
+        for (; x < w - 1; ++x)
         {
             int img_idx = y * w + x;
 
