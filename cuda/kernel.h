@@ -12,6 +12,9 @@ struct CudaTimingBreakdown {
     double allocation_ms = 0.0;
     double h2d_ms = 0.0;
     double kernel_ms = 0.0;
+    double smem_load_ms = 0.0;   // cooperative tile load from global → shared mem
+    double sync_ms      = 0.0;   // __syncthreads() barrier
+    double compute_ms   = 0.0;   // convolution + sqrtf/atan2f + output store
     double d2h_ms = 0.0;
     double free_ms = 0.0;
 };

@@ -43,6 +43,11 @@ void print_timing_line(const std::string& label, double milliseconds) {
               << std::right << std::fixed << std::setprecision(3)
               << milliseconds << " ms" << std::endl;
 }
+void print_timing_line_us(const std::string& label, double milliseconds) {
+    std::cout << "  " << std::left << std::setw(22) << label
+              << std::right << std::fixed << std::setprecision(3)
+              << milliseconds * 1000.0 << " us" << std::endl;
+}
 
 void print_usage(const char* program) {
     std::cerr
@@ -170,9 +175,9 @@ CudaTimingBreakdown average_timing(const std::vector<RunResult>& results) {
         return avg;
     }
 
+    avg.num_gpus = results.front().timing.num_gpus;
     avg.block_x = results.front().timing.block_x;
     avg.block_y = results.front().timing.block_y;
-    avg.num_gpus = results.front().timing.num_gpus;
     avg.grid_x = results.front().timing.grid_x;
     avg.grid_y = results.front().timing.grid_y;
     avg.copied_output_to_host = results.front().timing.copied_output_to_host;
@@ -183,12 +188,21 @@ CudaTimingBreakdown average_timing(const std::vector<RunResult>& results) {
         avg.kernel_ms += result.timing.kernel_ms;
         avg.d2h_ms += result.timing.d2h_ms;
         avg.free_ms += result.timing.free_ms;
+        avg.smem_load_ms += result.timing.smem_load_ms;
+        avg.sync_ms += result.timing.sync_ms; 
+        avg.compute_ms += result.timing.compute_ms; 
+        avg.d2h_ms += result.timing.d2h_ms; 
+        avg.free_ms += result.timing.free_ms; 
     }
 
     const double n = static_cast<double>(results.size());
     avg.allocation_ms /= n;
     avg.h2d_ms /= n;
     avg.kernel_ms /= n;
+    avg.d2h_ms /= n;
+    avg.free_ms /= n;
+    avg.sync_ms /= n;
+    avg.compute_ms /= n;
     avg.d2h_ms /= n;
     avg.free_ms /= n;
     return avg;
@@ -275,6 +289,9 @@ void write_csv_rows(
             << result.timing.allocation_ms << ','
             << result.timing.h2d_ms << ','
             << result.timing.kernel_ms << ','
+            << result.timing.smem_load_ms << ','
+            << result.timing.sync_ms << ','
+            << result.timing.compute_ms << ','
             << result.timing.d2h_ms << ','
             << result.timing.free_ms << ','
             << result.cuda_section_ms << ','
@@ -403,6 +420,9 @@ int main(int argc, char* argv[]) {
         print_timing_line("device allocation", avg_timing.allocation_ms);
         print_timing_line("host to device", avg_timing.h2d_ms);
         print_timing_line("kernel execution", avg_timing.kernel_ms);
+        print_timing_line("  smem load", avg_timing.smem_load_ms);
+        print_timing_line("  sync barrier", avg_timing.sync_ms);
+        print_timing_line("  compute", avg_timing.compute_ms);
         print_timing_line("device to host", avg_timing.d2h_ms);
         print_timing_line("device free", avg_timing.free_ms);
         print_timing_line("cuda section total", average_cuda_section_ms(results));

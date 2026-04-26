@@ -51,37 +51,87 @@ __global__ void sobel_kernel(
     const uint8_t* input,
     int width,
     int height,
-    float* magnitude,
-    float* direction
+    float* __restrict__ magnitude,
+    float* __restrict__ direction,
+
+    unsigned long long* smem_load_clocks,
+    unsigned long long* sync_clocks,
+    unsigned long long* compute_clocks
 ) {
-    const int out_x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int out_y = blockIdx.y * blockDim.y + threadIdx.y;
-    const int out_width = width - 2;
+    extern __shared__ uint8_t tile[];
+
+    const int BX = static_cast<int>(blockDim.x);
+    const int BY = static_cast<int>(blockDim.y);
+    const int tile_w = BX + 2;   // shared mem row stride
+    const int tile_h = BY + 2;
+
+    const int tx = static_cast<int>(threadIdx.x);
+    const int ty = static_cast<int>(threadIdx.y);
+
+    // Top-left corner of this block's OUTPUT region in the output image.
+    const int out_x0 = static_cast<int>(blockIdx.x) * BX;
+    const int out_y0 = static_cast<int>(blockIdx.y) * BY;
+
+    // Top-left corner of the INPUT tile (one pixel of halo above/left).
+    const int in_x0 = out_x0;   // output pixel (out_x, out_y) reads input at
+    const int in_y0 = out_y0;   // (out_x+1, out_y+1), so tile[0,0] = input[in_x0, in_y0]
+
+    const int out_width  = width  - 2;
     const int out_height = height - 2;
 
-    if (out_x >= out_width || out_y >= out_height) {
-        return;
+    const bool do_clocks = (smem_load_clocks != nullptr);
+    unsigned long long t0 = 0, t1 = 0, t2 = 0, t3 = 0;
+
+    const int tid = ty * BX + tx;
+    const int block_threads = BX * BY;
+    const int tile_size = tile_w * tile_h;
+
+    if (do_clocks && tid == 0) t0 = clock64();
+
+    for (int i = tid; i < tile_size; i += block_threads) {
+        const int tile_row = i / tile_w;
+        const int tile_col = i % tile_w;
+
+        // Map tile coordinate to global input coordinate, clamp to valid range.
+        const int gx = max(0, min(width  - 1, in_x0 + tile_col));
+        const int gy = max(0, min(height - 1, in_y0 + tile_row));
+
+        tile[i] = input[gy * width + gx];
     }
 
-    const int x = out_x + 1;
-    const int y = out_y + 1;
+    if (do_clocks && tid == 0) t1 = clock64();
 
-    float sum_x = 0.0f;
-    float sum_y = 0.0f;
+    __syncthreads();
 
-    // Each thread computes one output pixel from its surrounding 3x3 patch.
-    for (int ky = -1; ky <= 1; ++ky) {
-        for (int kx = -1; kx <= 1; ++kx) {
-            const int kernel_index = (ky + 1) * 3 + (kx + 1);
-            const uint8_t pixel = input[(y + ky) * width + (x + kx)];
-            sum_x += static_cast<float>(pixel) * static_cast<float>(kGx[kernel_index]);
-            sum_y += static_cast<float>(pixel) * static_cast<float>(kGy[kernel_index]);
+    if (do_clocks && tid == 0) t2 = clock64();
+
+    const int out_x = out_x0 + tx;
+    const int out_y = out_y0 + ty;
+
+    if (out_x < out_width && out_y < out_height) {
+        float sum_x = 0.0f;
+        float sum_y = 0.0f;
+
+        for (int ky = 0; ky < 3; ++ky) {
+            for (int kx = 0; kx < 3; ++kx) {
+                const int kernel_index = ky * 3 + kx;
+                const float px = static_cast<float>(tile[(ty + ky) * tile_w + (tx + kx)]);
+                sum_x += px * static_cast<float>(kGx[kernel_index]);
+                sum_y += px * static_cast<float>(kGy[kernel_index]);
+            }
         }
+
+        const int output_index = out_y * out_width + out_x;
+        magnitude[output_index] = sqrtf(sum_x * sum_x + sum_y * sum_y);
+        direction[output_index] = atan2f(sum_y, sum_x);
     }
 
-    const int output_index = out_y * out_width + out_x;
-    magnitude[output_index] = sqrtf(sum_x * sum_x + sum_y * sum_y);
-    direction[output_index] = atan2f(sum_y, sum_x);
+    if (do_clocks && tid == 0) {
+        t3 = clock64();
+        smem_load_clocks[blockIdx.y * gridDim.x + blockIdx.x] = t1 - t0;
+        sync_clocks     [blockIdx.y * gridDim.x + blockIdx.x] = t2 - t1;
+        compute_clocks  [blockIdx.y * gridDim.x + blockIdx.x] = t3 - t2;
+    }
 }
 
 struct DeviceWork {
@@ -174,6 +224,8 @@ CudaTimingBreakdown compute_sobel_cuda_multi_gpu_impl(
         static_cast<unsigned int>(launch_config.block_x),
         static_cast<unsigned int>(launch_config.block_y)
     );
+    const size_t smem_bytes =
+        static_cast<size_t>(block.x + 2) * (block.y + 2) * sizeof(uint8_t);
 
     CudaTimingBreakdown timing;
     timing.num_gpus = active_gpus;
@@ -258,14 +310,16 @@ CudaTimingBreakdown compute_sobel_cuda_multi_gpu_impl(
                 static_cast<unsigned int>(work.grid_x),
                 static_cast<unsigned int>(work.grid_y)
             );
-            sobel_kernel<<<grid, block, 0, work.stream>>>(
+            // Sub-phase clock buffers: not used in multi-GPU path for simplicity.
+            sobel_kernel_smem<<<grid, block, smem_bytes, work.stream>>>(
                 work.d_input,
                 width,
                 work.local_input_rows,
                 work.d_magnitude,
-                work.d_direction
+                work.d_direction,
+                nullptr, nullptr, nullptr
             );
-            check_cuda(cudaGetLastError(), "sobel_kernel multi launch");
+            check_cuda(cudaGetLastError(), "sobel_kernel_smem multi launch");
         }
         for (DeviceWork& work : works) {
             check_cuda(cudaSetDevice(work.device), "cudaSetDevice(multi kernel sync)");
@@ -342,23 +396,17 @@ CudaTimingBreakdown compute_sobel_cuda(
     float* direction,
     const CudaLaunchConfig& launch_config
 ) {
-    if (width < 3 || height < 3) {
+    if (width < 3 || height < 3)
         throw std::runtime_error("width and height must both be at least 3");
-    }
     validate_launch_config(launch_config);
-    if (launch_config.copy_output_to_host && (magnitude == nullptr || direction == nullptr)) {
-        throw std::runtime_error("host output buffers are required when copying output to host");
-    }
-    if (launch_config.use_multi_gpu || launch_config.num_gpus > 1) {
-        return compute_sobel_cuda_multi_gpu_impl(
-            input,
-            width,
-            height,
-            magnitude,
-            direction,
-            launch_config
-        );
-    }
+    if (launch_config.copy_output_to_host && (magnitude == nullptr || direction == nullptr))
+        throw std::runtime_error("host output buffers required when copying output to host");
+
+    // if (launch_config.use_multi_gpu || launch_config.num_gpus > 1) {
+    //     return compute_sobel_cuda_multi_gpu_impl(
+    //         input, width, height, magnitude, direction, launch_config
+    //     );
+    // }
 
     CudaTimingBreakdown timing;
     timing.num_gpus = 1;
@@ -370,17 +418,42 @@ CudaTimingBreakdown compute_sobel_cuda(
     const size_t output_bytes =
         static_cast<size_t>(width - 2) * (height - 2) * sizeof(float);
 
-    uint8_t* d_input = nullptr;
-    float* d_magnitude = nullptr;
-    float* d_direction = nullptr;
+    const dim3 block(
+        static_cast<unsigned int>(launch_config.block_x),
+        static_cast<unsigned int>(launch_config.block_y)
+    );
+    const dim3 grid(
+        static_cast<unsigned int>((width  - 2 + block.x - 1) / block.x),
+        static_cast<unsigned int>((height - 2 + block.y - 1) / block.y)
+    );
+    timing.grid_x = static_cast<int>(grid.x);
+    timing.grid_y = static_cast<int>(grid.y);
+
+    // Shared memory: (BX+2) * (BY+2) bytes per block.
+    const size_t smem_bytes =
+        static_cast<size_t>(block.x + 2) * (block.y + 2) * sizeof(uint8_t);
+
+    
+    const size_t num_blocks = static_cast<size_t>(grid.x) * grid.y;
+    const size_t clock_bytes = num_blocks * sizeof(unsigned long long);
+
+    unsigned long long* d_smem_load_clocks = nullptr;
+    unsigned long long* d_sync_clocks      = nullptr;
+    unsigned long long* d_compute_clocks   = nullptr;
+
+    uint8_t* d_input     = nullptr;
+    float*   d_magnitude = nullptr;
+    float*   d_direction = nullptr;
 
     const auto allocation_start = std::chrono::steady_clock::now();
-    check_cuda(cudaMalloc(&d_input, input_bytes), "cudaMalloc(d_input)");
+    check_cuda(cudaMalloc(&d_input, input_bytes),  "cudaMalloc(d_input)");
     check_cuda(cudaMalloc(&d_magnitude, output_bytes), "cudaMalloc(d_magnitude)");
     check_cuda(cudaMalloc(&d_direction, output_bytes), "cudaMalloc(d_direction)");
+    check_cuda(cudaMalloc(&d_smem_load_clocks, clock_bytes),  "cudaMalloc(d_smem_load_clocks)");
+    check_cuda(cudaMalloc(&d_sync_clocks,clock_bytes),  "cudaMalloc(d_sync_clocks)");
+    check_cuda(cudaMalloc(&d_compute_clocks,clock_bytes),  "cudaMalloc(d_compute_clocks)");
     const auto allocation_end = std::chrono::steady_clock::now();
-    timing.allocation_ms =
-        std::chrono::duration<double, std::milli>(allocation_end - allocation_start).count();
+    timing.allocation_ms = elapsed_host_ms(allocation_start, allocation_end);
 
     try {
         cudaEvent_t h2d_start = nullptr;
@@ -409,33 +482,65 @@ CudaTimingBreakdown compute_sobel_cuda(
         check_cuda(cudaEventSynchronize(h2d_stop), "cudaEventSynchronize(h2d_stop)");
         timing.h2d_ms = elapsed_event_ms(h2d_start, h2d_stop);
 
-        const dim3 block(
-            static_cast<unsigned int>(launch_config.block_x),
-            static_cast<unsigned int>(launch_config.block_y)
+        check_cuda(cudaEventRecord(kernel_start), "cudaEventRecord(kernel_start)");
+        sobel_kernel_smem<<<grid, block, smem_bytes>>>(
+            d_input, width, height,
+            d_magnitude, d_direction,
+            d_smem_load_clocks, d_sync_clocks, d_compute_clocks
         );
-        const dim3 grid(
-            static_cast<unsigned int>((width - 2 + block.x - 1) / block.x),
-            static_cast<unsigned int>((height - 2 + block.y - 1) / block.y)
-        );
-        timing.grid_x = static_cast<int>(grid.x);
-        timing.grid_y = static_cast<int>(grid.y);
-
-        check_cuda(
-            cudaEventRecord(kernel_start),
-            "cudaEventRecord(kernel_start)"
-        );
-        sobel_kernel<<<grid, block>>>(d_input, width, height, d_magnitude, d_direction);
-        check_cuda(cudaGetLastError(), "sobel_kernel launch");
+        // timing.h2d_ms +=1123123123;
+        check_cuda(cudaGetLastError(), "sobel_kernel_smem launch");
         check_cuda(cudaEventRecord(kernel_stop), "cudaEventRecord(kernel_stop)");
         check_cuda(cudaEventSynchronize(kernel_stop), "cudaEventSynchronize(kernel_stop)");
         timing.kernel_ms = elapsed_event_ms(kernel_start, kernel_stop);
-        check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+        check_cuda(cudaDeviceSynchronize(),  "cudaDeviceSynchronize");
 
-        if (launch_config.copy_output_to_host) {
+        {
+            int sm_clock_khz = 0;
             check_cuda(
-                cudaEventRecord(d2h_start),
-                "cudaEventRecord(d2h_start)"
+                cudaDeviceGetAttribute(&sm_clock_khz, cudaDevAttrClockRate, 0),
+                "cudaDeviceGetAttribute(clockRate)"
             );
+            const double cycles_per_ms = static_cast<double>(sm_clock_khz);
+
+            std::vector<unsigned long long> h_smem(num_blocks);
+            std::vector<unsigned long long> h_sync(num_blocks);
+            std::vector<unsigned long long> h_comp(num_blocks);
+
+            check_cuda(
+                cudaMemcpy(h_smem.data(), d_smem_load_clocks,
+                           clock_bytes, cudaMemcpyDeviceToHost),
+                "cudaMemcpy(smem_load_clocks D2H)"
+            );
+            check_cuda(
+                cudaMemcpy(h_sync.data(), d_sync_clocks,
+                           clock_bytes, cudaMemcpyDeviceToHost),
+                "cudaMemcpy(sync_clocks D2H)"
+            );
+            check_cuda(
+                cudaMemcpy(h_comp.data(), d_compute_clocks,
+                           clock_bytes, cudaMemcpyDeviceToHost),
+                "cudaMemcpy(compute_clocks D2H)"
+            );
+
+            unsigned long long max_smem = 0, max_sync = 0, max_comp = 0;
+            for (size_t i = 0; i < num_blocks; ++i) {
+                max_smem = std::max(max_smem, h_smem[i]);
+                max_sync = std::max(max_sync, h_sync[i]);
+                max_comp = std::max(max_comp, h_comp[i]);
+                // max_smem += h_smem[i];
+                // max_sync += h_sync[i];
+                // max_comp += h_comp[i];
+            }
+
+            timing.smem_load_ms = static_cast<double>(max_smem) / cycles_per_ms;
+            timing.sync_ms      = static_cast<double>(max_sync) / cycles_per_ms;
+            timing.compute_ms   = static_cast<double>(max_comp) / cycles_per_ms;
+        }
+
+        // --- D2H ---
+        if (launch_config.copy_output_to_host) {
+            check_cuda(cudaEventRecord(d2h_start), "cudaEventRecord(d2h_start)");
             check_cuda(
                 cudaMemcpy(magnitude, d_magnitude, output_bytes, cudaMemcpyDeviceToHost),
                 "cudaMemcpy(magnitude D2H)"
@@ -452,13 +557,16 @@ CudaTimingBreakdown compute_sobel_cuda(
         check_cuda(cudaEventDestroy(h2d_start), "cudaEventDestroy(h2d_start)");
         check_cuda(cudaEventDestroy(h2d_stop), "cudaEventDestroy(h2d_stop)");
         check_cuda(cudaEventDestroy(kernel_start), "cudaEventDestroy(kernel_start)");
-        check_cuda(cudaEventDestroy(kernel_stop), "cudaEventDestroy(kernel_stop)");
+        check_cuda(cudaEventDestroy(kernel_stop "cudaEventDestroy(kernel_stop)");
         check_cuda(cudaEventDestroy(d2h_start), "cudaEventDestroy(d2h_start)");
         check_cuda(cudaEventDestroy(d2h_stop), "cudaEventDestroy(d2h_stop)");
     } catch (...) {
         cudaFree(d_input);
         cudaFree(d_magnitude);
         cudaFree(d_direction);
+        cudaFree(d_smem_load_clocks);
+        cudaFree(d_sync_clocks);
+        cudaFree(d_compute_clocks);
         throw;
     }
 
@@ -466,9 +574,11 @@ CudaTimingBreakdown compute_sobel_cuda(
     check_cuda(cudaFree(d_input), "cudaFree(d_input)");
     check_cuda(cudaFree(d_magnitude), "cudaFree(d_magnitude)");
     check_cuda(cudaFree(d_direction), "cudaFree(d_direction)");
+    check_cuda(cudaFree(d_smem_load_clocks), "cudaFree(d_smem_load_clocks)");
+    check_cuda(cudaFree(d_sync_clocks), "cudaFree(d_sync_clocks)");
+    check_cuda(cudaFree(d_compute_clocks), "cudaFree(d_compute_clocks)");
     const auto free_end = std::chrono::steady_clock::now();
-    timing.free_ms =
-        std::chrono::duration<double, std::milli>(free_end - free_start).count();
+    timing.free_ms = elapsed_host_ms(free_start, free_end);
 
     return timing;
 }
