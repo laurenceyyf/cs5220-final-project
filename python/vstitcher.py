@@ -17,10 +17,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def sobel_vectorized(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     image = np.asarray(image, dtype=np.float32)
-    print(image.shape)
+    # print(image.shape)
     
-    # Define kernels (assuming these were global in your snippet)
-    GX = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32)
+    GX = np.array([
+        [-1, 0, 1], 
+        [-2, 0, 2], 
+        [-1, 0, 1]], dtype=np.float32)
     GY = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.float32)
 
     # Use Scipy's convolution (much faster than manual loops)
@@ -32,8 +34,8 @@ def sobel_vectorized(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     magnitude = np.sqrt(gx**2 + gy**2)
     direction = np.arctan2(gy, gx)
-    print(direction)
-    print(magnitude.shape, direction.shape)
+    # print(direction)
+    # print(magnitude.shape, direction.shape)
     return magnitude, direction
 
 def stitch_images(data, pixel_height, pixel_width, img_dim=28):
@@ -42,24 +44,19 @@ def stitch_images(data, pixel_height, pixel_width, img_dim=28):
     pixel_height: target height in pixels
     pixel_width: target width in pixels
     """
-    # 1. Calculate necessary grid size
+
     grid_rows = int(np.ceil(pixel_height / img_dim))
     grid_cols = int(np.ceil(pixel_width / img_dim))
     n_images = grid_rows * grid_cols
     
-    # 2. Grab and reshape subset
     rng = np.random.default_rng()
     subset = rng.choice(data, size=n_images, replace=True, axis=0).reshape(n_images, img_dim, img_dim)
     
-    # 3. Reshape into grid structure
     grid = subset.reshape(grid_rows, grid_cols, img_dim, img_dim)
-    
-    # 4. Transpose and reshape to create the full image
-    # We transpose to (rows, img_h, cols, img_w) then reshape to merge the dims
     stitched = grid.transpose(0, 2, 1, 3).reshape(grid_rows * img_dim, grid_cols * img_dim)
     
-    # 5. Crop to the exact pixel dimensions requested
     cropped = stitched[:pixel_height, :pixel_width]
+
     return cropped.ravel()
 
 
@@ -77,9 +74,9 @@ def main():
     print('running sobel')
     magnitude, direction = sobel_vectorized(stitch_images_arr.reshape(args.height, args.width))
 
-    actmag, actdir = sobel_reference(stitch_images_arr.reshape(args.height, args.width))
-    print(np.allclose(magnitude, actmag))
-    print(np.allclose(direction, actdir))
+    # actmag, actdir = sobel_reference(stitch_images_arr.reshape(args.height, args.width))
+    # print(np.allclose(magnitude, actmag))
+    # print(np.allclose(direction, actdir))
 
     print('writing output')
     combined_floats = np.concatenate([magnitude, direction]).astype('float32')
