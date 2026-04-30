@@ -39,25 +39,16 @@ static inline __attribute__((target("avx2,fma")))  __m256 avx2_atan2_ps(__m256 y
     __m256 den_nz = _mm256_cmp_ps(t_den, zero, _CMP_NEQ_OQ);
     __m256 t = _mm256_div_ps(t_num, _mm256_blendv_ps(one, t_den, den_nz));
 
-    // polynomial atan(t) for t in [0,1]
-    // coef: minimax degree-9 odd poly  a1*t + a3*t^3 + ... + a9*t^9
-    const __m256 a1 = _mm256_set1_ps( 0.99997726f);
-    const __m256 a3 = _mm256_set1_ps(-0.33262347f);
-    const __m256 a5 = _mm256_set1_ps( 0.19354346f);
-    const __m256 a7 = _mm256_set1_ps(-0.11643287f);
-    const __m256 a9 = _mm256_set1_ps( 0.05265332f);
-    const __m256 a11= _mm256_set1_ps(-0.01172120f);  // degree-11 for extra headroom
-
-    __m256 t2 = _mm256_mul_ps(t, t);
-    // Horner: a11 + t2*(a9 + t2*(a7 + t2*(a5 + t2*(a3 + t2*a1))))
-    // evaluated as: ((((a11*t2 + a9)*t2 + a7)*t2 + a5)*t2 + a3)*t2 + a1) * t
-    __m256 p = a11;
-    p = _mm256_fmadd_ps(p, t2, a9);
-    p = _mm256_fmadd_ps(p, t2, a7);
-    p = _mm256_fmadd_ps(p, t2, a5);
-    p = _mm256_fmadd_ps(p, t2, a3);
-    p = _mm256_fmadd_ps(p, t2, a1);
-    p = _mm256_mul_ps(p, t);   // atan(t) ∈ [0, pi/4]
+    //https://www-labs.iro.umontreal.ca/~mignotte/IFT2425/Documents/EfficientApproximationArctgFunction.pdf
+    // atan(t) ~ (pi/4)*t + 0.273*t*(1 - t) = (pi/4 - 0.273)*t^2 + 0.273*t
+    const __m256 c         = _mm256_set1_ps(0.273f);   // the 0.285... constant
+    const __m256 pi_4_plus_c = _mm256_set1_ps(0.7853981634f + 0.273f);
+    __m256 p = _mm256_fmadd_ps(
+                   t,
+                   _mm256_fnmadd_ps(c, t, pi_4_plus_c),    // pi/4 + c - c*t
+                   zero);                                  // + 0 (keeps it as mul)
+    // simplify: just two FMA-friendly ops
+    p = _mm256_mul_ps(t, _mm256_fnmadd_ps(c, t, pi_4_plus_c));
 
     // If we swapped (|y|>|x|), atan(t) -> pi/2 - atan(t)
     p = _mm256_blendv_ps(p, _mm256_sub_ps(pi_2, p), swap);
