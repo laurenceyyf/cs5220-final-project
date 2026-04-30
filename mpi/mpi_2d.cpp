@@ -15,6 +15,62 @@ static inline __m256i load_u8x8_to_i32(const uint8_t *ptr)
     return _mm256_cvtepu8_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i *>(ptr)));
 }
 
+
+// 11-deg approx of atan2
+static inline __attribute__((target("avx2,fma")))  __m256 avx2_atan2_ps(__m256 y, __m256 x)
+{
+    const __m256 pi        = _mm256_set1_ps( 3.14159265358979f);
+    const __m256 pi_2      = _mm256_set1_ps( 1.57079632679490f);
+    const __m256 zero      = _mm256_setzero_ps();
+    const __m256 one       = _mm256_set1_ps(1.0f);
+    const __m256 sign_mask = _mm256_set1_ps(-0.0f);   // 0x80000000
+
+    __m256 ax = _mm256_andnot_ps(sign_mask, x);   // |x|
+    __m256 ay = _mm256_andnot_ps(sign_mask, y);   // |y|
+    __m256 x_neg = _mm256_cmp_ps(x, zero, _CMP_LT_OQ);  // x < 0
+    __m256 y_neg = _mm256_cmp_ps(y, zero, _CMP_LT_OQ);  // y < 0
+
+    // swap = (ay > ax),  t = min/max
+    __m256 swap  = _mm256_cmp_ps(ay, ax, _CMP_GT_OQ);
+    __m256 t_num = _mm256_blendv_ps(ay, ax, swap);   // min(ax,ay) 
+    __m256 t_den = _mm256_blendv_ps(ax, ay, swap);   // max(ax,ay)
+
+    // Safe division: if den==0, t=0
+    __m256 den_nz = _mm256_cmp_ps(t_den, zero, _CMP_NEQ_OQ);
+    __m256 t = _mm256_div_ps(t_num, _mm256_blendv_ps(one, t_den, den_nz));
+
+    // polynomial atan(t) for t in [0,1]
+    // coef: minimax degree-9 odd poly  a1*t + a3*t^3 + ... + a9*t^9
+    const __m256 a1 = _mm256_set1_ps( 0.99997726f);
+    const __m256 a3 = _mm256_set1_ps(-0.33262347f);
+    const __m256 a5 = _mm256_set1_ps( 0.19354346f);
+    const __m256 a7 = _mm256_set1_ps(-0.11643287f);
+    const __m256 a9 = _mm256_set1_ps( 0.05265332f);
+    const __m256 a11= _mm256_set1_ps(-0.01172120f);  // degree-11 for extra headroom
+
+    __m256 t2 = _mm256_mul_ps(t, t);
+    // Horner: a11 + t2*(a9 + t2*(a7 + t2*(a5 + t2*(a3 + t2*a1))))
+    // evaluated as: ((((a11*t2 + a9)*t2 + a7)*t2 + a5)*t2 + a3)*t2 + a1) * t
+    __m256 p = a11;
+    p = _mm256_fmadd_ps(p, t2, a9);
+    p = _mm256_fmadd_ps(p, t2, a7);
+    p = _mm256_fmadd_ps(p, t2, a5);
+    p = _mm256_fmadd_ps(p, t2, a3);
+    p = _mm256_fmadd_ps(p, t2, a1);
+    p = _mm256_mul_ps(p, t);   // atan(t) ∈ [0, pi/4]
+
+    // If we swapped (|y|>|x|), atan(t) -> pi/2 - atan(t)
+    p = _mm256_blendv_ps(p, _mm256_sub_ps(pi_2, p), swap);
+
+    // If x < 0: atan -> pi - atan  (we're in Q2 or Q3)
+    p = _mm256_blendv_ps(p, _mm256_sub_ps(pi, p), x_neg);
+
+    // Restore sign from y
+    __m256 y_sign = _mm256_and_ps(y, sign_mask);
+    p = _mm256_xor_ps(p, y_sign);
+
+    return p;
+}
 void sobel(const uint8_t *local_in, int w,
            float *mag, float *dir,
            int y_start, int y_end,
@@ -53,14 +109,17 @@ void sobel(const uint8_t *local_in, int w,
             int magdir_idx = (y - 1) * (w - 2) + (x - 1);
             _mm256_storeu_ps(mag + magdir_idx, mag_v);
 
-            alignas(32) float sx_arr[8];
-            alignas(32) float sy_arr[8];
-            _mm256_store_ps(sx_arr, sx);
-            _mm256_store_ps(sy_arr, sy);
-            for (int lane = 0; lane < 8; ++lane)
-            {
-                dir[magdir_idx + lane] = std::atan2(sy_arr[lane], sx_arr[lane]);
-            }
+            // alignas(32) float sx_arr[8];
+            // alignas(32) float sy_arr[8];
+            // _mm256_store_ps(sx_arr, sx);
+            // _mm256_store_ps(sy_arr, sy);
+            // for (int lane = 0; lane < 8; ++lane)
+            // {
+            //     dir[magdir_idx + lane] = std::atan2(sy_arr[lane], sx_arr[lane]);
+            // }
+            __m256 dir_v = avx2_atan2_ps(sy, sx);
+            _mm256_storeu_ps(dir + magdir_idx, dir_v);
+
         }
 
         for (; x < x_end; ++x)
