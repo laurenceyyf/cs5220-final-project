@@ -1,0 +1,65 @@
+#!/bin/bash
+#SBATCH --job-name=sobel_benchmark
+#SBATCH --account=m4341          # <-- fill in your account/project
+#SBATCH --constraint=gpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=00:10:00
+#SBATCH --output=./cuda_out/sobel_benchmark_rajan_%j.out
+
+module load python
+module load conda
+conda activate nersc-python
+
+INPUT_PATH="${PSCRATCH}/data/GB_32768_32768.img.bin"          # path to raw grayscale input .bin
+OUTPUT_DIR="${PSCRATCH}/data/GB_32768_32768_cuda_rajan"             # directory for per-run output .bin files
+WIDTH=32768                               # image width in pixels
+HEIGHT=32768                              # image height in pixels
+EXECUTABLE="./build/sobel_cuda"                     # path to your compiled binary
+CSV_PATH="./cuda_out/sobel_timing_rajan_${SLURM_JOB_ID}.csv"
+# =============================================================================
+
+mkdir -p "$OUTPUT_DIR"
+
+BLOCK_CONFIGS=("8x8" "18x6" "16x16" "32x8" "32x16" "32x32")
+
+echo "========================================"
+echo "Sobel CUDA Benchmark — Perlmutter"
+echo "Job ID:    ${SLURM_JOB_ID}"
+echo "Image:     ${WIDTH}x${HEIGHT}"
+echo "Input:     ${INPUT_PATH}"
+echo "CSV:       ${CSV_PATH}"
+echo "Blocks:    ${BLOCK_CONFIGS[*]}"
+echo "Repeats:   3 per block config"
+echo "GPUs:      1"
+echo "========================================"
+
+for BLOCK in "${BLOCK_CONFIGS[@]}"; do
+    echo ""
+    echo "--- Block config: ${BLOCK} ---"
+
+    OUTPUT_PATH="${OUTPUT_DIR}/output_block${BLOCK}_job${SLURM_JOB_ID}.magdir.bin"
+
+    "$EXECUTABLE" \
+        --block "$BLOCK" \
+        --num-gpus 1 \
+        --repeats 3 \
+        --csv "$CSV_PATH" \
+        --csv-append \
+        "$INPUT_PATH" \
+        "$OUTPUT_PATH" \
+        "$WIDTH" \
+        "$HEIGHT"
+
+    STATUS=$?
+    if [ $STATUS -ne 0 ]; then
+        echo "ERROR: run failed for block ${BLOCK} (exit code ${STATUS})"
+    fi
+done
+
+echo ""
+echo "========================================"
+echo "Benchmark complete. Timing CSV: ${CSV_PATH}"
+echo "========================================"

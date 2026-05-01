@@ -47,6 +47,41 @@ double elapsed_host_ms(
     return std::chrono::duration<double, std::milli>(stop - start).count();
 }
 
+
+__device__ __forceinline__ float cuda_atan2_f32(float y, float x) {
+    const float PI          = 3.14159265358979f;
+    const float PI_2        = 1.57079632679490f;
+    const float C           = 0.273f;
+    const float PI_4_PLUS_C = 0.7853981634f + 0.273f;
+
+    // Absolute values
+    float ax = fabsf(x);
+    float ay = fabsf(y);
+
+    // Determine if we need to swap x and y (equivalent to _mm256_cmp_ps + _mm256_blendv_ps)
+    bool swap = (ay > ax);
+    float t_num = swap ? ax : ay; 
+    float t_den = swap ? ay : ax;
+
+    // Safe division: prevent division by zero
+    // In CUDA, if t_den is 0.0f, x and y were both 0, so atan2 is undefined (usually 0)
+    float t = (t_den != 0.0f) ? (t_num / t_den) : 0.0f;
+
+    // Approximation: atan(t) ~ t * ( (pi/4 + c) - c*t )
+    // Using fmaf(a, b, c) calculates (a * b + c)
+    // We want: t * (PI_4_PLUS_C - C * t)
+    float p = t * fmaf(-C, t, PI_4_PLUS_C);
+
+    // If we swapped (|y| > |x|), p = pi/2 - p
+    if (swap) p = PI_2 - p;
+
+    // If x < 0, p = pi - p (Handles Quadrants 2 and 3)
+    if (x < 0.0f) p = PI - p;
+
+    // Restore the sign of y (Equivalent to xor with sign bit)
+    // copybit copies the sign of the second argument to the first
+    return copysignf(p, y);
+}
 __global__ void sobel_kernel(
     const uint8_t* input,
     int width,
@@ -81,7 +116,7 @@ __global__ void sobel_kernel(
 
     const int output_index = out_y * out_width + out_x;
     magnitude[output_index] = sqrtf(sum_x * sum_x + sum_y * sum_y);
-    direction[output_index] = atan2f(sum_y, sum_x);
+    direction[output_index] = cuda_atan2_f32(sum_y, sum_x);
 }
 
 struct DeviceWork {

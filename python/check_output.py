@@ -5,8 +5,6 @@ import sys
 
 import numpy as np
 
-from io_utils import read_f32_image, read_u8_image
-from sobel_reference import sobel_reference
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,8 +14,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("to_check", help="Path to outputted .magdir.bin")
     parser.add_argument("reference", help="Path to precaled .magdir.bin")
-    parser.add_argument("width", type=int, default=28, help="pixel widths")
-    parser.add_argument("height", type=int, default=28, help="pixel height")
+    parser.add_argument("height", type=int, default=28, help="pixel heights")
+    parser.add_argument("width", type=int, default=28, help="pixel width")
     parser.add_argument("--atol", type=float, default=1e-4, help="Absolute tolerance")
     parser.add_argument("--rtol", type=float, default=1e-4, help="Relative tolerance")
     parser.add_argument(
@@ -37,7 +35,7 @@ def main() -> int:
     all_tocheck= np.fromfile(args.to_check, dtype=np.float32)
     all_reference= np.fromfile(args.reference, dtype=np.float32)
 
-    size = (args.width - 2) * (args.height-2)
+    size = (args.height - 2) * (args.width-2)
 
     to_check_mag = all_tocheck[:size]
     to_check_dir = all_tocheck[size:]
