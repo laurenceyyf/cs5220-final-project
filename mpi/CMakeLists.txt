@@ -5,13 +5,6 @@ set(CMAKE_CXX_STANDARD 17)
 
 find_package(MPI REQUIRED)
 
-add_executable(sobel_mpi 
-    main.cpp 
-)
-
-target_link_libraries(sobel_mpi PRIVATE 
-    MPI::MPI_CXX 
-)
 
 
 add_executable(sobel_mpi1d 
