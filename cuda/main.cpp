@@ -49,6 +49,8 @@ void print_usage(const char* program) {
         << "Usage: " << program << " [options] <input.bin> <output.bin> <width> <height>\n"
         << "\n"
         << "Options:\n"
+        << "  --variant NAME        CUDA kernel variant: naive, atan_approx,\n"
+        << "                        shared, shared_atan_approx\n"
         << "  --block WxH           CUDA thread block shape, default 16x16\n"
         << "  --block-x N           CUDA block x dimension\n"
         << "  --block-y N           CUDA block y dimension\n"
@@ -107,6 +109,26 @@ void parse_block_shape(const std::string& value, ProgramOptions& options) {
         parse_positive_int(value.substr(separator + 1), "block y dimension");
 }
 
+CudaKernelVariant parse_kernel_variant(const std::string& value) {
+    if (value == "naive") {
+        return CudaKernelVariant::NaiveExact;
+    }
+    if (value == "atan_approx") {
+        return CudaKernelVariant::NaiveAtanApprox;
+    }
+    if (value == "shared") {
+        return CudaKernelVariant::SharedExact;
+    }
+    if (value == "shared_atan_approx") {
+        return CudaKernelVariant::SharedAtanApprox;
+    }
+
+    throw std::runtime_error(
+        "unknown --variant value: " + value
+        + " (expected naive, atan_approx, shared, or shared_atan_approx)"
+    );
+}
+
 ProgramOptions parse_args(int argc, char* argv[]) {
     ProgramOptions options;
     std::vector<std::string> positional;
@@ -116,6 +138,9 @@ ProgramOptions parse_args(int argc, char* argv[]) {
         if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             std::exit(0);
+        } else if (arg == "--variant") {
+            options.launch_config.variant =
+                parse_kernel_variant(next_arg(i, argc, argv, arg));
         } else if (arg == "--block") {
             parse_block_shape(next_arg(i, argc, argv, arg), options);
         } else if (arg == "--block-x") {
@@ -170,6 +195,7 @@ CudaTimingBreakdown average_timing(const std::vector<RunResult>& results) {
         return avg;
     }
 
+    avg.variant = results.front().timing.variant;
     avg.block_x = results.front().timing.block_x;
     avg.block_y = results.front().timing.block_y;
     avg.num_gpus = results.front().timing.num_gpus;
@@ -253,7 +279,7 @@ void write_csv_rows(
     }
 
     if (need_header) {
-        csv << "input_path,width,height,total_pixels,warmup_runs,block_x,block_y,"
+        csv << "input_path,width,height,variant,total_pixels,warmup_runs,block_x,block_y,"
             << "num_gpus,grid_x,grid_y,run,allocation_ms,h2d_ms,kernel_ms,d2h_ms,"
             << "free_ms,cuda_section_ms,copied_output_to_host,no_output_write\n";
     }
@@ -264,6 +290,7 @@ void write_csv_rows(
         csv << csv_escape(options.input_path) << ','
             << options.width << ','
             << options.height << ','
+            << cuda_kernel_variant_name(result.timing.variant) << ','
             << total_pixels << ','
             << options.warmup << ','
             << result.timing.block_x << ','
@@ -324,7 +351,9 @@ int main(int argc, char* argv[]) {
         float* direction_ptr = direction.empty() ? nullptr : direction.data();
 
         std::cout << "Processing " << options.width << "x" << options.height
-                  << " image on CUDA with "
+                  << " image on CUDA with variant "
+                  << cuda_kernel_variant_name(options.launch_config.variant)
+                  << ", "
                   << options.launch_config.num_gpus << " GPU(s) and block "
                   << options.launch_config.block_x << "x"
                   << options.launch_config.block_y << "..." << std::endl;
@@ -395,6 +424,7 @@ int main(int argc, char* argv[]) {
         const CudaTimingBreakdown avg_timing = average_timing(results);
         std::cout << "Measured runs: " << options.repeats
                   << " after " << options.warmup << " warm-up run(s)" << std::endl;
+        std::cout << "CUDA variant: " << cuda_kernel_variant_name(avg_timing.variant) << std::endl;
         std::cout << "CUDA GPUs used: " << avg_timing.num_gpus << std::endl;
         std::cout << "CUDA grid: " << avg_timing.grid_x << "x"
                   << avg_timing.grid_y << std::endl;

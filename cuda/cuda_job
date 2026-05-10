@@ -14,16 +14,19 @@ module load conda
 conda activate nersc-python
 
 INPUT_PATH="${PSCRATCH}/data/GB_32768_32768.img.bin"          # path to raw grayscale input .bin
-OUTPUT_DIR="${PSCRATCH}/data/GB_32768_32768_cuda_rajan"             # directory for per-run output .bin files
+OUTPUT_DIR="${PSCRATCH}/data/GB_32768_32768_cuda_rajan"      # placeholder output path root
 WIDTH=32768                               # image width in pixels
 HEIGHT=32768                              # image height in pixels
 EXECUTABLE="./build/sobel_cuda"                     # path to your compiled binary
 CSV_PATH="./cuda_out/sobel_timing_rajan_${SLURM_JOB_ID}.csv"
+VARIANTS=("naive" "atan_approx" "shared" "shared_atan_approx")
+BLOCK_CONFIGS=("8x8" "18x6" "16x16" "32x8" "32x16" "32x32")
+WARMUP=1
+REPEATS=5
 # =============================================================================
 
 mkdir -p "$OUTPUT_DIR"
-
-BLOCK_CONFIGS=("8x8" "18x6" "16x16" "32x8" "32x16" "32x32")
+mkdir -p "$(dirname "$CSV_PATH")"
 
 echo "========================================"
 echo "Sobel CUDA Benchmark — Perlmutter"
@@ -31,32 +34,40 @@ echo "Job ID:    ${SLURM_JOB_ID}"
 echo "Image:     ${WIDTH}x${HEIGHT}"
 echo "Input:     ${INPUT_PATH}"
 echo "CSV:       ${CSV_PATH}"
+echo "Variants:  ${VARIANTS[*]}"
 echo "Blocks:    ${BLOCK_CONFIGS[*]}"
-echo "Repeats:   3 per block config"
+echo "Warmup:    ${WARMUP}"
+echo "Repeats:   ${REPEATS} per block config"
 echo "GPUs:      1"
 echo "========================================"
 
-for BLOCK in "${BLOCK_CONFIGS[@]}"; do
+for VARIANT in "${VARIANTS[@]}"; do
     echo ""
-    echo "--- Block config: ${BLOCK} ---"
+    echo "=== Variant: ${VARIANT} ==="
+    for BLOCK in "${BLOCK_CONFIGS[@]}"; do
+        echo "--- Block config: ${BLOCK} ---"
 
-    OUTPUT_PATH="${OUTPUT_DIR}/output_block${BLOCK}_job${SLURM_JOB_ID}.magdir.bin"
+        OUTPUT_PATH="${OUTPUT_DIR}/output_${VARIANT}_block${BLOCK}_job${SLURM_JOB_ID}.magdir.bin"
 
-    "$EXECUTABLE" \
-        --block "$BLOCK" \
-        --num-gpus 1 \
-        --repeats 3 \
-        --csv "$CSV_PATH" \
-        --csv-append \
-        "$INPUT_PATH" \
-        "$OUTPUT_PATH" \
-        "$WIDTH" \
-        "$HEIGHT"
+        "$EXECUTABLE" \
+            --variant "$VARIANT" \
+            --block "$BLOCK" \
+            --num-gpus 1 \
+            --warmup "$WARMUP" \
+            --repeats "$REPEATS" \
+            --csv "$CSV_PATH" \
+            --csv-append \
+            --no-output-write \
+            "$INPUT_PATH" \
+            "$OUTPUT_PATH" \
+            "$WIDTH" \
+            "$HEIGHT"
 
-    STATUS=$?
-    if [ $STATUS -ne 0 ]; then
-        echo "ERROR: run failed for block ${BLOCK} (exit code ${STATUS})"
-    fi
+        STATUS=$?
+        if [ $STATUS -ne 0 ]; then
+            echo "ERROR: run failed for variant ${VARIANT}, block ${BLOCK} (exit code ${STATUS})"
+        fi
+    done
 done
 
 echo ""

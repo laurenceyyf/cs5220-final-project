@@ -18,6 +18,13 @@ CUDA_BUILD_DIR = CUDA_SOURCE_DIR / "build"
 CUDA_BINARY = CUDA_BUILD_DIR / "sobel_cuda"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "data" / "cuda_benchmark"
 DEFAULT_BLOCKS = ["8x8", "16x8", "16x16", "32x8", "32x16", "32x32"]
+DEFAULT_VARIANTS = ["naive"]
+ALLOWED_VARIANTS = {
+    "naive",
+    "atan_approx",
+    "shared",
+    "shared_atan_approx",
+}
 
 
 def build_parser():
@@ -38,6 +45,15 @@ def build_parser():
         "--block",
         default="16x16",
         help="Fixed CUDA block shape for multi-GPU sweeps",
+    )
+    parser.add_argument(
+        "--variants",
+        nargs="+",
+        default=DEFAULT_VARIANTS,
+        help=(
+            "CUDA kernel variants to run. Choices: naive, atan_approx, "
+            "shared, shared_atan_approx"
+        ),
     )
     parser.add_argument(
         "--blocks",
@@ -133,6 +149,16 @@ def validate_gpu_count(gpu_count):
     return gpu_count
 
 
+def validate_variant(variant):
+    if variant not in ALLOWED_VARIANTS:
+        raise ValueError(
+            "Unknown CUDA variant '{}'; choose from {}".format(
+                variant, ", ".join(sorted(ALLOWED_VARIANTS))
+            )
+        )
+    return variant
+
+
 def ensure_cuda_binary(skip_build):
     if skip_build:
         if not CUDA_BINARY.exists():
@@ -180,6 +206,7 @@ def main():
 
         blocks = [validate_block(block) for block in args.blocks]
         fixed_block = validate_block(args.block)
+        variants = [validate_variant(variant) for variant in args.variants]
         gpu_counts = None
         if args.gpus is not None:
             gpu_counts = [validate_gpu_count(gpu_count) for gpu_count in args.gpus]
@@ -188,15 +215,16 @@ def main():
         input_dir = output_dir / "inputs"
         input_path = input_dir / (stem + ".img.bin")
         if gpu_counts is not None:
-            experiment_dir = (
-                output_dir / "multi_gpu" / "strong_scaling" / "{}x{}".format(args.width, args.height)
+            sweep_dir = "variant_strong_scaling" if len(variants) > 1 else "strong_scaling"
+            experiment_dir = output_dir / "multi_gpu" / sweep_dir / "{}x{}".format(
+                args.width, args.height
             )
         else:
-            experiment_dir = (
-                output_dir
-                / "single_gpu"
-                / "block_shape_sweep"
-                / "{}x{}".format(args.width, args.height)
+            sweep_dir = (
+                "variant_block_shape_sweep" if len(variants) > 1 else "block_shape_sweep"
+            )
+            experiment_dir = output_dir / "single_gpu" / sweep_dir / "{}x{}".format(
+                args.width, args.height
             )
         experiment_dir.mkdir(parents=True, exist_ok=True)
         if args.csv:
@@ -220,49 +248,55 @@ def main():
         )
 
         if gpu_counts is not None:
-            for gpu_count in gpu_counts:
-                output_path = experiment_dir / (
-                    "{}gpu.{}.magdir.bin".format(gpu_count, fixed_block)
-                )
-                cmd = [
-                    CUDA_BINARY,
-                    "--num-gpus",
-                    gpu_count,
-                    "--block",
-                    fixed_block,
-                    "--warmup",
-                    args.warmup,
-                    "--repeats",
-                    args.repeats,
-                    "--csv",
-                    csv_path,
-                    "--csv-append",
-                    "--no-output-write",
-                ]
-                if args.kernel_only:
-                    cmd.append("--skip-d2h")
-                cmd.extend([input_path, output_path, args.width, args.height])
-                run_command(cmd)
+            for variant in variants:
+                for gpu_count in gpu_counts:
+                    output_path = experiment_dir / (
+                        "{}.{}gpu.{}.magdir.bin".format(variant, gpu_count, fixed_block)
+                    )
+                    cmd = [
+                        CUDA_BINARY,
+                        "--variant",
+                        variant,
+                        "--num-gpus",
+                        gpu_count,
+                        "--block",
+                        fixed_block,
+                        "--warmup",
+                        args.warmup,
+                        "--repeats",
+                        args.repeats,
+                        "--csv",
+                        csv_path,
+                        "--csv-append",
+                        "--no-output-write",
+                    ]
+                    if args.kernel_only:
+                        cmd.append("--skip-d2h")
+                    cmd.extend([input_path, output_path, args.width, args.height])
+                    run_command(cmd)
         else:
-            for block in blocks:
-                output_path = experiment_dir / (block + ".magdir.bin")
-                cmd = [
-                    CUDA_BINARY,
-                    "--block",
-                    block,
-                    "--warmup",
-                    args.warmup,
-                    "--repeats",
-                    args.repeats,
-                    "--csv",
-                    csv_path,
-                    "--csv-append",
-                    "--no-output-write",
-                ]
-                if args.kernel_only:
-                    cmd.append("--skip-d2h")
-                cmd.extend([input_path, output_path, args.width, args.height])
-                run_command(cmd)
+            for variant in variants:
+                for block in blocks:
+                    output_path = experiment_dir / ("{}.{}.magdir.bin".format(variant, block))
+                    cmd = [
+                        CUDA_BINARY,
+                        "--variant",
+                        variant,
+                        "--block",
+                        block,
+                        "--warmup",
+                        args.warmup,
+                        "--repeats",
+                        args.repeats,
+                        "--csv",
+                        csv_path,
+                        "--csv-append",
+                        "--no-output-write",
+                    ]
+                    if args.kernel_only:
+                        cmd.append("--skip-d2h")
+                    cmd.extend([input_path, output_path, args.width, args.height])
+                    run_command(cmd)
 
         print("Wrote CUDA timing CSV: {}".format(csv_path))
         return 0
