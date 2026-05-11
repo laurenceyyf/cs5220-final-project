@@ -9,66 +9,67 @@
 #SBATCH --time=00:10:00
 #SBATCH --output=./cuda_out/sobel_benchmark_rajan_%j.out
 
+set -euo pipefail
+
 module load python
 module load conda
 conda activate nersc-python
 
-INPUT_PATH="${PSCRATCH}/data/GB_32768_32768.img.bin"          # path to raw grayscale input .bin
-OUTPUT_DIR="${PSCRATCH}/data/GB_32768_32768_cuda_rajan"      # placeholder output path root
-WIDTH=32768                               # image width in pixels
-HEIGHT=32768                              # image height in pixels
-EXECUTABLE="./build/sobel_cuda"                     # path to your compiled binary
-CSV_PATH="./cuda_out/sobel_timing_rajan_${SLURM_JOB_ID}.csv"
-VARIANTS=("naive" "atan_approx" "shared" "shared_atan_approx")
-BLOCK_CONFIGS=("8x8" "18x6" "16x16" "32x8" "32x16" "32x32")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+WIDTH=32768
+HEIGHT=32768
+CSV_PATH="${SCRIPT_DIR}/cuda_out/sobel_timing_rajan_${SLURM_JOB_ID}.csv"
+OUTPUT_DIR="${PSCRATCH}/data/cuda_benchmark"
+VARIANTS=("naive" "shared")
+ATAN_METHODS=("exact" "approx_1deg" "approx_2deg" "approx_15deg")
+BLOCK_CONFIGS=("8x8" "16x16" "32x8" "32x16")
 WARMUP=1
 REPEATS=5
-# =============================================================================
+# Large performance runs should avoid CPU-side full-image error scans.
+# Submit with MEASURE_ERROR=1 for smaller accuracy sweeps if needed.
+MEASURE_ERROR="${MEASURE_ERROR:-0}"
 
-mkdir -p "$OUTPUT_DIR"
-mkdir -p "$(dirname "$CSV_PATH")"
+mkdir -p "$(dirname "${CSV_PATH}")"
+
+EXTRA_ARGS=()
+if [[ "${MEASURE_ERROR}" == "1" ]]; then
+    EXTRA_ARGS+=(--measure-error)
+fi
 
 echo "========================================"
-echo "Sobel CUDA Benchmark — Perlmutter"
-echo "Job ID:    ${SLURM_JOB_ID}"
-echo "Image:     ${WIDTH}x${HEIGHT}"
-echo "Input:     ${INPUT_PATH}"
-echo "CSV:       ${CSV_PATH}"
-echo "Variants:  ${VARIANTS[*]}"
-echo "Blocks:    ${BLOCK_CONFIGS[*]}"
-echo "Warmup:    ${WARMUP}"
-echo "Repeats:   ${REPEATS} per block config"
-echo "GPUs:      1"
+echo "Sobel CUDA Benchmark - Perlmutter"
+echo "Job ID:       ${SLURM_JOB_ID}"
+echo "Image:        ${WIDTH}x${HEIGHT}"
+echo "Input source: Fashion-MNIST stitched tiles"
+echo "Output dir:   ${OUTPUT_DIR}"
+echo "CSV:          ${CSV_PATH}"
+echo "Variants:     ${VARIANTS[*]}"
+echo "atan2:        ${ATAN_METHODS[*]}"
+echo "Blocks:       ${BLOCK_CONFIGS[*]}"
+echo "Warmup:       ${WARMUP}"
+echo "Repeats:      ${REPEATS} per block config"
+echo "Error:        ${MEASURE_ERROR}"
+echo "GPUs:         1"
 echo "========================================"
 
-for VARIANT in "${VARIANTS[@]}"; do
-    echo ""
-    echo "=== Variant: ${VARIANT} ==="
-    for BLOCK in "${BLOCK_CONFIGS[@]}"; do
-        echo "--- Block config: ${BLOCK} ---"
+cd "${REPO_ROOT}"
 
-        OUTPUT_PATH="${OUTPUT_DIR}/output_${VARIANT}_block${BLOCK}_job${SLURM_JOB_ID}.magdir.bin"
-
-        "$EXECUTABLE" \
-            --variant "$VARIANT" \
-            --block "$BLOCK" \
-            --num-gpus 1 \
-            --warmup "$WARMUP" \
-            --repeats "$REPEATS" \
-            --csv "$CSV_PATH" \
-            --csv-append \
-            --no-output-write \
-            "$INPUT_PATH" \
-            "$OUTPUT_PATH" \
-            "$WIDTH" \
-            "$HEIGHT"
-
-        STATUS=$?
-        if [ $STATUS -ne 0 ]; then
-            echo "ERROR: run failed for variant ${VARIANT}, block ${BLOCK} (exit code ${STATUS})"
-        fi
-    done
-done
+python3 tools/cuda_profile_sweep.py \
+    --width "${WIDTH}" \
+    --height "${HEIGHT}" \
+    --prefix fashion_mnist_sobel \
+    --input-source fashion_mnist \
+    --variants "${VARIANTS[@]}" \
+    --atan-methods "${ATAN_METHODS[@]}" \
+    --blocks "${BLOCK_CONFIGS[@]}" \
+    --repeats "${REPEATS}" \
+    --warmup "${WARMUP}" \
+    --output-dir "${OUTPUT_DIR}" \
+    --csv "${CSV_PATH}" \
+    --skip-build \
+    "${EXTRA_ARGS[@]}"
 
 echo ""
 echo "========================================"

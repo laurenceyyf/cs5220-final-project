@@ -1,9 +1,11 @@
 #include <cstdint>
 #include <chrono>
 #include <cstdlib>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -30,18 +32,33 @@ struct ProgramOptions {
     std::string csv_path;
     bool csv_append = false;
     bool no_output_write = false;
+    bool measure_error = false;
+    bool atan_method_explicit = false;
     CudaLaunchConfig launch_config;
 };
 
 struct RunResult {
     CudaTimingBreakdown timing;
     double cuda_section_ms = 0.0;
+    double mean_direction_error_deg = std::numeric_limits<double>::quiet_NaN();
+    double max_direction_error_deg = std::numeric_limits<double>::quiet_NaN();
+};
+
+struct DirectionErrorStats {
+    double mean_abs_error_deg = std::numeric_limits<double>::quiet_NaN();
+    double max_abs_error_deg = std::numeric_limits<double>::quiet_NaN();
 };
 
 void print_timing_line(const std::string& label, double milliseconds) {
     std::cout << "  " << std::left << std::setw(22) << label
               << std::right << std::fixed << std::setprecision(3)
               << milliseconds << " ms" << std::endl;
+}
+
+void print_metric_line(const std::string& label, double value, const std::string& unit) {
+    std::cout << "  " << std::left << std::setw(22) << label
+              << std::right << std::fixed << std::setprecision(3)
+              << value << " " << unit << std::endl;
 }
 
 void print_usage(const char* program) {
@@ -51,6 +68,9 @@ void print_usage(const char* program) {
         << "Options:\n"
         << "  --variant NAME        CUDA kernel variant: naive, atan_approx,\n"
         << "                        shared, shared_atan_approx\n"
+        << "  --atan-method NAME    Direction method: exact, approx_1deg,\n"
+        << "                        approx_2deg, approx_5deg, approx_11deg,\n"
+        << "                        approx_15deg\n"
         << "  --block WxH           CUDA thread block shape, default 16x16\n"
         << "  --block-x N           CUDA block x dimension\n"
         << "  --block-y N           CUDA block y dimension\n"
@@ -61,6 +81,7 @@ void print_usage(const char* program) {
         << "  --csv-append          Append CSV rows instead of replacing the file\n"
         << "  --no-output-write     Skip writing the output .bin file\n"
         << "  --skip-d2h            Skip device-to-host output copies; requires --no-output-write\n"
+        << "  --measure-error       Compare direction output against exact atan2f on CPU\n"
         << "  --help                Show this help text\n";
 }
 
@@ -129,6 +150,43 @@ CudaKernelVariant parse_kernel_variant(const std::string& value) {
     );
 }
 
+CudaAtanMethod parse_atan_method(const std::string& value) {
+    if (value == "exact") {
+        return CudaAtanMethod::Exact;
+    }
+    if (value == "approx_1deg" || value == "1deg") {
+        return CudaAtanMethod::Approx1Deg;
+    }
+    if (value == "approx_2deg" || value == "atan_approx" || value == "2deg") {
+        return CudaAtanMethod::Approx2Deg;
+    }
+    if (value == "approx_5deg" || value == "5deg") {
+        return CudaAtanMethod::Approx5Deg;
+    }
+    if (value == "approx_11deg" || value == "11deg") {
+        return CudaAtanMethod::Approx11Deg;
+    }
+    if (value == "approx_15deg" || value == "15deg") {
+        return CudaAtanMethod::Approx15Deg;
+    }
+
+    throw std::runtime_error(
+        "unknown --atan-method value: " + value
+        + " (expected exact, approx_1deg, approx_2deg, approx_5deg, "
+        + "approx_11deg, or approx_15deg)"
+    );
+}
+
+void apply_legacy_variant_defaults(ProgramOptions& options) {
+    if (options.atan_method_explicit) {
+        return;
+    }
+    if (options.launch_config.variant == CudaKernelVariant::NaiveAtanApprox
+        || options.launch_config.variant == CudaKernelVariant::SharedAtanApprox) {
+        options.launch_config.atan_method = CudaAtanMethod::Approx2Deg;
+    }
+}
+
 ProgramOptions parse_args(int argc, char* argv[]) {
     ProgramOptions options;
     std::vector<std::string> positional;
@@ -141,6 +199,10 @@ ProgramOptions parse_args(int argc, char* argv[]) {
         } else if (arg == "--variant") {
             options.launch_config.variant =
                 parse_kernel_variant(next_arg(i, argc, argv, arg));
+        } else if (arg == "--atan-method") {
+            options.launch_config.atan_method =
+                parse_atan_method(next_arg(i, argc, argv, arg));
+            options.atan_method_explicit = true;
         } else if (arg == "--block") {
             parse_block_shape(next_arg(i, argc, argv, arg), options);
         } else if (arg == "--block-x") {
@@ -165,6 +227,8 @@ ProgramOptions parse_args(int argc, char* argv[]) {
             options.no_output_write = true;
         } else if (arg == "--skip-d2h") {
             options.launch_config.copy_output_to_host = false;
+        } else if (arg == "--measure-error") {
+            options.measure_error = true;
         } else if (!arg.empty() && arg[0] == '-') {
             throw std::runtime_error("unknown option: " + arg);
         } else {
@@ -186,6 +250,10 @@ ProgramOptions parse_args(int argc, char* argv[]) {
     if (!options.launch_config.copy_output_to_host && !options.no_output_write) {
         throw std::runtime_error("--skip-d2h requires --no-output-write");
     }
+    apply_legacy_variant_defaults(options);
+    if (options.measure_error && !options.launch_config.copy_output_to_host) {
+        throw std::runtime_error("--measure-error requires copying output to host");
+    }
     return options;
 }
 
@@ -196,6 +264,7 @@ CudaTimingBreakdown average_timing(const std::vector<RunResult>& results) {
     }
 
     avg.variant = results.front().timing.variant;
+    avg.atan_method = results.front().timing.atan_method;
     avg.block_x = results.front().timing.block_x;
     avg.block_y = results.front().timing.block_y;
     avg.num_gpus = results.front().timing.num_gpus;
@@ -218,6 +287,77 @@ CudaTimingBreakdown average_timing(const std::vector<RunResult>& results) {
     avg.d2h_ms /= n;
     avg.free_ms /= n;
     return avg;
+}
+
+float exact_direction_for_pixel(const uint8_t* input, int width, int x, int y) {
+    const int gx[9] = {
+        -1, 0, 1,
+        -2, 0, 2,
+        -1, 0, 1
+    };
+    const int gy[9] = {
+        -1, -2, -1,
+         0,  0,  0,
+         1,  2,  1
+    };
+
+    float sum_x = 0.0f;
+    float sum_y = 0.0f;
+    for (int ky = -1; ky <= 1; ++ky) {
+        for (int kx = -1; kx <= 1; ++kx) {
+            const int kernel_index = (ky + 1) * 3 + (kx + 1);
+            const uint8_t pixel = input[(y + ky) * width + (x + kx)];
+            sum_x += static_cast<float>(pixel) * static_cast<float>(gx[kernel_index]);
+            sum_y += static_cast<float>(pixel) * static_cast<float>(gy[kernel_index]);
+        }
+    }
+    return std::atan2(sum_y, sum_x);
+}
+
+double wrapped_abs_angle_error_deg(double actual, double expected) {
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kTwoPi = 2.0 * kPi;
+    double diff = std::fmod(actual - expected + kPi, kTwoPi);
+    if (diff < 0.0) {
+        diff += kTwoPi;
+    }
+    diff -= kPi;
+    return std::abs(diff) * 180.0 / kPi;
+}
+
+DirectionErrorStats measure_direction_error(
+    const std::vector<uint8_t>& input,
+    const std::vector<float>& direction,
+    int width,
+    int height
+) {
+    const int out_width = width - 2;
+    const int out_height = height - 2;
+    const size_t count = static_cast<size_t>(out_width) * out_height;
+    if (direction.size() != count) {
+        throw std::runtime_error("direction output is unavailable for error measurement");
+    }
+
+    double sum_error = 0.0;
+    double max_error = 0.0;
+    for (int out_y = 0; out_y < out_height; ++out_y) {
+        for (int out_x = 0; out_x < out_width; ++out_x) {
+            const size_t index = static_cast<size_t>(out_y) * out_width + out_x;
+            const float expected =
+                exact_direction_for_pixel(input.data(), width, out_x + 1, out_y + 1);
+            const double error =
+                wrapped_abs_angle_error_deg(direction[index], expected);
+            sum_error += error;
+            if (error > max_error) {
+                max_error = error;
+            }
+        }
+    }
+
+    DirectionErrorStats stats;
+    stats.mean_abs_error_deg = sum_error / static_cast<double>(count);
+    stats.max_abs_error_deg = max_error;
+    return stats;
 }
 
 double average_cuda_section_ms(const std::vector<RunResult>& results) {
@@ -279,9 +419,11 @@ void write_csv_rows(
     }
 
     if (need_header) {
-        csv << "input_path,width,height,variant,total_pixels,warmup_runs,block_x,block_y,"
+        csv << "input_path,width,height,variant,implementation,atan_method,total_pixels,"
+            << "warmup_runs,block_x,block_y,"
             << "num_gpus,grid_x,grid_y,run,allocation_ms,h2d_ms,kernel_ms,d2h_ms,"
-            << "free_ms,cuda_section_ms,copied_output_to_host,no_output_write\n";
+            << "free_ms,cuda_section_ms,total_ms,copied_output_to_host,no_output_write,"
+            << "mean_error_deg,max_error_deg,error_unit\n";
     }
 
     csv << std::fixed << std::setprecision(6);
@@ -291,6 +433,8 @@ void write_csv_rows(
             << options.width << ','
             << options.height << ','
             << cuda_kernel_variant_name(result.timing.variant) << ','
+            << cuda_kernel_implementation_name(result.timing.variant) << ','
+            << cuda_atan_method_name(result.timing.atan_method) << ','
             << total_pixels << ','
             << options.warmup << ','
             << result.timing.block_x << ','
@@ -305,8 +449,12 @@ void write_csv_rows(
             << result.timing.d2h_ms << ','
             << result.timing.free_ms << ','
             << result.cuda_section_ms << ','
+            << result.cuda_section_ms << ','
             << (result.timing.copied_output_to_host ? 1 : 0) << ','
-            << (options.no_output_write ? 1 : 0) << '\n';
+            << (options.no_output_write ? 1 : 0) << ','
+            << result.mean_direction_error_deg << ','
+            << result.max_direction_error_deg << ','
+            << "degrees" << '\n';
     }
 }
 
@@ -353,6 +501,8 @@ int main(int argc, char* argv[]) {
         std::cout << "Processing " << options.width << "x" << options.height
                   << " image on CUDA with variant "
                   << cuda_kernel_variant_name(options.launch_config.variant)
+                  << ", atan method "
+                  << cuda_atan_method_name(options.launch_config.atan_method)
                   << ", "
                   << options.launch_config.num_gpus << " GPU(s) and block "
                   << options.launch_config.block_x << "x"
@@ -385,6 +535,20 @@ int main(int argc, char* argv[]) {
             const auto compute_end = std::chrono::steady_clock::now();
             result.cuda_section_ms = elapsed_ms(compute_start, compute_end);
             results.push_back(result);
+        }
+
+        DirectionErrorStats error_stats;
+        if (options.measure_error) {
+            error_stats = measure_direction_error(
+                img_data,
+                direction,
+                options.width,
+                options.height
+            );
+            for (RunResult& result : results) {
+                result.mean_direction_error_deg = error_stats.mean_abs_error_deg;
+                result.max_direction_error_deg = error_stats.max_abs_error_deg;
+            }
         }
 
         double output_write_ms = 0.0;
@@ -425,6 +589,10 @@ int main(int argc, char* argv[]) {
         std::cout << "Measured runs: " << options.repeats
                   << " after " << options.warmup << " warm-up run(s)" << std::endl;
         std::cout << "CUDA variant: " << cuda_kernel_variant_name(avg_timing.variant) << std::endl;
+        std::cout << "CUDA implementation: "
+                  << cuda_kernel_implementation_name(avg_timing.variant) << std::endl;
+        std::cout << "atan method: "
+                  << cuda_atan_method_name(avg_timing.atan_method) << std::endl;
         std::cout << "CUDA GPUs used: " << avg_timing.num_gpus << std::endl;
         std::cout << "CUDA grid: " << avg_timing.grid_x << "x"
                   << avg_timing.grid_y << std::endl;
@@ -438,6 +606,10 @@ int main(int argc, char* argv[]) {
         print_timing_line("cuda section total", average_cuda_section_ms(results));
         if (!options.no_output_write) {
             print_timing_line("host output write", output_write_ms);
+        }
+        if (options.measure_error) {
+            print_metric_line("mean dir error", error_stats.mean_abs_error_deg, "deg");
+            print_metric_line("max dir error", error_stats.max_abs_error_deg, "deg");
         }
         print_timing_line("end-to-end total", elapsed_ms(total_start, total_end));
         if (!options.csv_path.empty()) {

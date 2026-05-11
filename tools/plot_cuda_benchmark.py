@@ -28,8 +28,20 @@ TIMING_FIELDS = [
 
 VARIANT_ORDER = [
     "naive",
+    "naive:exact",
+    "naive:approx_1deg",
+    "naive:approx_2deg",
+    "naive:approx_5deg",
+    "naive:approx_11deg",
+    "naive:approx_15deg",
     "atan_approx",
     "shared",
+    "shared:exact",
+    "shared:approx_1deg",
+    "shared:approx_2deg",
+    "shared:approx_5deg",
+    "shared:approx_11deg",
+    "shared:approx_15deg",
     "shared_atan_approx",
 ]
 
@@ -73,6 +85,8 @@ def read_rows(path):
 
 
 def row_variant(row):
+    if "implementation" in row and "atan_method" in row:
+        return "{}:{}".format(row["implementation"], row["atan_method"])
     return row.get("variant", "naive")
 
 
@@ -251,16 +265,22 @@ def plot_speedup(summaries, out_path):
 def plot_variant_comparison(variant_summaries, out_path):
     labels = [item["label"] for item in next(iter(variant_summaries.values()))]
     x_positions = list(range(len(labels)))
+    variants = list(variant_summaries.keys())
+    group_width = 0.82
+    bar_width = group_width / float(max(1, len(variants)))
 
-    fig, ax = plt.subplots(figsize=(8.8, 5.0))
-    for variant, summaries in variant_summaries.items():
+    fig, ax = plt.subplots(figsize=(10.6, 5.4))
+    for variant_index, (variant, summaries) in enumerate(variant_summaries.items()):
         by_label = {item["label"]: item["kernel_ms"] for item in summaries}
         kernel_ms = [by_label[label] for label in labels]
-        ax.plot(
-            x_positions,
+        offsets = [
+            x - group_width / 2.0 + bar_width * (variant_index + 0.5)
+            for x in x_positions
+        ]
+        ax.bar(
+            offsets,
             kernel_ms,
-            marker="o",
-            linewidth=2.0,
+            width=bar_width * 0.92,
             label=variant,
         )
 
@@ -270,10 +290,59 @@ def plot_variant_comparison(variant_summaries, out_path):
     ax.set_ylabel("Average kernel time (ms)")
     ax.set_title("CUDA Sobel Variant Comparison")
     ax.grid(axis="y", alpha=0.3)
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, ncol=2, fontsize=9)
     fig.tight_layout()
     fig.savefig(out_path, dpi=220)
     plt.close(fig)
+
+
+def plot_block_sensitivity_focus(variant_summaries, out_path):
+    selected_variants = [
+        "naive:exact",
+        "naive:approx_2deg",
+        "shared:exact",
+        "shared:approx_2deg",
+    ]
+    selected_variants = [
+        variant for variant in selected_variants if variant in variant_summaries
+    ]
+    if not selected_variants:
+        return False
+
+    labels = [item["label"] for item in variant_summaries[selected_variants[0]]]
+    x_positions = list(range(len(labels)))
+    markers = {
+        "naive:exact": "o",
+        "naive:approx_2deg": "s",
+        "shared:exact": "^",
+        "shared:approx_2deg": "D",
+    }
+
+    fig, ax = plt.subplots(figsize=(8.8, 4.9))
+    for variant in selected_variants:
+        summaries = variant_summaries[variant]
+        by_label = {item["label"]: item["kernel_ms"] for item in summaries}
+        kernel_ms = [by_label[label] for label in labels]
+        ax.scatter(
+            x_positions,
+            kernel_ms,
+            s=78,
+            marker=markers.get(variant, "o"),
+            label=variant,
+            zorder=3,
+        )
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(labels)
+    ax.set_xlabel("CUDA block shape")
+    ax.set_ylabel("Average kernel time (ms)")
+    ax.set_title("CUDA Sobel Block-Size Sensitivity")
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(frameon=False, ncol=2, fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=220)
+    plt.close(fig)
+    return True
 
 
 def nice_max(values):
@@ -526,6 +595,9 @@ def main():
             comparison_path = out_dir / (prefix + ".cuda_variant_comparison." + plot_format)
             plot_variant_comparison(variant_summaries, comparison_path)
             print("Wrote {}".format(comparison_path))
+            block_focus_path = out_dir / (prefix + ".cuda_block_sensitivity_focus." + plot_format)
+            if plot_block_sensitivity_focus(variant_summaries, block_focus_path):
+                print("Wrote {}".format(block_focus_path))
         return 0
     except Exception as exc:
         print("Error: {}".format(exc), file=sys.stderr)

@@ -25,6 +25,38 @@ const char* cuda_kernel_variant_name(CudaKernelVariant variant) {
     return "unknown";
 }
 
+const char* cuda_kernel_implementation_name(CudaKernelVariant variant) {
+    switch (variant) {
+        case CudaKernelVariant::NaiveExact:
+        case CudaKernelVariant::NaiveAtanApprox:
+            return "naive";
+        case CudaKernelVariant::SharedExact:
+        case CudaKernelVariant::SharedAtanApprox:
+            return "shared";
+    }
+
+    return "unknown";
+}
+
+const char* cuda_atan_method_name(CudaAtanMethod method) {
+    switch (method) {
+        case CudaAtanMethod::Exact:
+            return "exact";
+        case CudaAtanMethod::Approx1Deg:
+            return "approx_1deg";
+        case CudaAtanMethod::Approx2Deg:
+            return "approx_2deg";
+        case CudaAtanMethod::Approx5Deg:
+            return "approx_5deg";
+        case CudaAtanMethod::Approx11Deg:
+            return "approx_11deg";
+        case CudaAtanMethod::Approx15Deg:
+            return "approx_15deg";
+    }
+
+    return "unknown";
+}
+
 namespace {
 
 __device__ __constant__ int kGx[9] = {
@@ -62,50 +94,85 @@ double elapsed_host_ms(
     return std::chrono::duration<double, std::milli>(stop - start).count();
 }
 
-__device__ __forceinline__ float cuda_atan2_f32(float y, float x) {
+__device__ __forceinline__ float cuda_atan2_common(
+    float y,
+    float x,
+    float atan_abs_t
+) {
     const float PI          = 3.14159265358979f;
     const float PI_2        = 1.57079632679490f;
-    const float C           = 0.273f;
-    const float PI_4_PLUS_C = 0.7853981634f + 0.273f;
 
-    // Absolute values
-    float ax = fabsf(x);
-    float ay = fabsf(y);
-
-    // Determine if we need to swap x and y (equivalent to _mm256_cmp_ps + _mm256_blendv_ps)
-    bool swap = (ay > ax);
-    float t_num = swap ? ax : ay; 
-    float t_den = swap ? ay : ax;
-
-    // Safe division: prevent division by zero
-    // In CUDA, if t_den is 0.0f, x and y were both 0, so atan2 is undefined (usually 0)
-    float t = (t_den != 0.0f) ? (t_num / t_den) : 0.0f;
-
-    // Approximation: atan(t) ~ t * ( (pi/4 + c) - c*t )
-    // Using fmaf(a, b, c) calculates (a * b + c)
-    // We want: t * (PI_4_PLUS_C - C * t)
-    float p = t * fmaf(-C, t, PI_4_PLUS_C);
-
-    // If we swapped (|y| > |x|), p = pi/2 - p
-    if (swap) p = PI_2 - p;
-
-    // If x < 0, p = pi - p (Handles Quadrants 2 and 3)
-    if (x < 0.0f) p = PI - p;
-
-    // Restore the sign of y (Equivalent to xor with sign bit)
-    // copybit copies the sign of the second argument to the first
+    float p = atan_abs_t;
+    if (fabsf(y) > fabsf(x)) {
+        p = PI_2 - p;
+    }
+    if (x < 0.0f) {
+        p = PI - p;
+    }
     return copysignf(p, y);
 }
 
-template <bool UseApproxDirection>
-__device__ __forceinline__ float sobel_direction(float sum_y, float sum_x) {
-    if constexpr (UseApproxDirection) {
-        return cuda_atan2_f32(sum_y, sum_x);
-    }
-    return atan2f(sum_y, sum_x);
+__device__ __forceinline__ float atan_poly_15(float t) {
+    float t2 = t * t;
+    float p = -0.0040540580f;
+    p = fmaf(p, t2, 0.0218612288f);
+    p = fmaf(p, t2, -0.0559098861f);
+    p = fmaf(p, t2, 0.0964200441f);
+    p = fmaf(p, t2, -0.1390853351f);
+    p = fmaf(p, t2, 0.1994653599f);
+    p = fmaf(p, t2, -0.3332985605f);
+    p = fmaf(p, t2, 0.9999993329f);
+    return p * t;
 }
 
-template <bool UseApproxDirection>
+__device__ __forceinline__ float atan_poly_11(float t) {
+    float t2 = t * t;
+    float p = -0.01172120f;
+    p = fmaf(p, t2, 0.05265332f);
+    p = fmaf(p, t2, -0.11643287f);
+    p = fmaf(p, t2, 0.19354346f);
+    p = fmaf(p, t2, -0.33262347f);
+    p = fmaf(p, t2, 0.99997726f);
+    return p * t;
+}
+
+__device__ __forceinline__ float atan_poly_5(float t) {
+    float t2 = t * t;
+    float p = 0.079331f;
+    p = fmaf(p, t2, -0.288679f);
+    p = fmaf(p, t2, 0.995354f);
+    return p * t;
+}
+
+template <CudaAtanMethod Method>
+__device__ __forceinline__ float sobel_direction(float sum_y, float sum_x) {
+    if constexpr (Method == CudaAtanMethod::Exact) {
+        return atan2f(sum_y, sum_x);
+    } else {
+        float ax = fabsf(sum_x);
+        float ay = fabsf(sum_y);
+        bool swap = (ay > ax);
+        float t_num = swap ? ax : ay;
+        float t_den = swap ? ay : ax;
+        float t = (t_den != 0.0f) ? (t_num / t_den) : 0.0f;
+
+        float p = 0.0f;
+        if constexpr (Method == CudaAtanMethod::Approx1Deg) {
+            p = t * 0.7853981634f;
+        } else if constexpr (Method == CudaAtanMethod::Approx2Deg) {
+            p = t * fmaf(-0.273f, t, 0.7853981634f + 0.273f);
+        } else if constexpr (Method == CudaAtanMethod::Approx5Deg) {
+            p = atan_poly_5(t);
+        } else if constexpr (Method == CudaAtanMethod::Approx11Deg) {
+            p = atan_poly_11(t);
+        } else if constexpr (Method == CudaAtanMethod::Approx15Deg) {
+            p = atan_poly_15(t);
+        }
+        return cuda_atan2_common(sum_y, sum_x, p);
+    }
+}
+
+template <CudaAtanMethod Method>
 __global__ void sobel_kernel_naive(
     const uint8_t* input,
     int width,
@@ -142,10 +209,10 @@ __global__ void sobel_kernel_naive(
 
     const int output_index = out_y * out_width + out_x;
     magnitude[output_index] = sqrtf(sum_x * sum_x + sum_y * sum_y);
-    direction[output_index] = sobel_direction<UseApproxDirection>(sum_y, sum_x);
+    direction[output_index] = sobel_direction<Method>(sum_y, sum_x);
 }
 
-template <bool UseApproxDirection>
+template <CudaAtanMethod Method>
 __global__ void sobel_kernel_shared(
     const uint8_t* input,
     int width,
@@ -207,7 +274,7 @@ __global__ void sobel_kernel_shared(
 
     const int output_index = out_y * out_width + out_x;
     magnitude[output_index] = sqrtf(sum_x * sum_x + sum_y * sum_y);
-    direction[output_index] = sobel_direction<UseApproxDirection>(sum_y, sum_x);
+    direction[output_index] = sobel_direction<Method>(sum_y, sum_x);
 }
 
 bool variant_uses_shared_memory(CudaKernelVariant variant) {
@@ -237,30 +304,43 @@ void launch_sobel_kernel(
     const CudaLaunchConfig& launch_config
 ) {
     const size_t shared_bytes = shared_memory_bytes_for_variant(launch_config);
+    const bool use_shared = variant_uses_shared_memory(launch_config.variant);
 
-    switch (launch_config.variant) {
-        case CudaKernelVariant::NaiveExact:
-            sobel_kernel_naive<false><<<grid, block, 0, stream>>>(
-                input, width, height, magnitude, direction
-            );
+#define LAUNCH_WITH_METHOD(method) \
+    do { \
+        if (use_shared) { \
+            sobel_kernel_shared<method><<<grid, block, shared_bytes, stream>>>( \
+                input, width, height, magnitude, direction \
+            ); \
+        } else { \
+            sobel_kernel_naive<method><<<grid, block, 0, stream>>>( \
+                input, width, height, magnitude, direction \
+            ); \
+        } \
+    } while (false)
+
+    switch (launch_config.atan_method) {
+        case CudaAtanMethod::Exact:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Exact);
             break;
-        case CudaKernelVariant::NaiveAtanApprox:
-            sobel_kernel_naive<true><<<grid, block, 0, stream>>>(
-                input, width, height, magnitude, direction
-            );
+        case CudaAtanMethod::Approx1Deg:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Approx1Deg);
             break;
-        case CudaKernelVariant::SharedExact:
-            sobel_kernel_shared<false><<<grid, block, shared_bytes, stream>>>(
-                input, width, height, magnitude, direction
-            );
+        case CudaAtanMethod::Approx2Deg:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Approx2Deg);
             break;
-        case CudaKernelVariant::SharedAtanApprox:
-            sobel_kernel_shared<true><<<grid, block, shared_bytes, stream>>>(
-                input, width, height, magnitude, direction
-            );
+        case CudaAtanMethod::Approx5Deg:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Approx5Deg);
+            break;
+        case CudaAtanMethod::Approx11Deg:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Approx11Deg);
+            break;
+        case CudaAtanMethod::Approx15Deg:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Approx15Deg);
             break;
     }
 
+#undef LAUNCH_WITH_METHOD
     check_cuda(cudaGetLastError(), "sobel kernel launch");
 }
 
@@ -357,6 +437,7 @@ CudaTimingBreakdown compute_sobel_cuda_multi_gpu_impl(
 
     CudaTimingBreakdown timing;
     timing.variant = launch_config.variant;
+    timing.atan_method = launch_config.atan_method;
     timing.num_gpus = active_gpus;
     timing.block_x = launch_config.block_x;
     timing.block_y = launch_config.block_y;
@@ -546,6 +627,7 @@ CudaTimingBreakdown compute_sobel_cuda(
 
     CudaTimingBreakdown timing;
     timing.variant = launch_config.variant;
+    timing.atan_method = launch_config.atan_method;
     timing.num_gpus = 1;
     timing.block_x = launch_config.block_x;
     timing.block_y = launch_config.block_y;

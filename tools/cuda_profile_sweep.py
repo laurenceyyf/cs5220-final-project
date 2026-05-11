@@ -16,14 +16,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CUDA_SOURCE_DIR = REPO_ROOT / "cuda"
 CUDA_BUILD_DIR = CUDA_SOURCE_DIR / "build"
 CUDA_BINARY = CUDA_BUILD_DIR / "sobel_cuda"
+DEFAULT_FASHION_MNIST_CSV = REPO_ROOT / "python" / "fashion-mnist_test.csv"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "data" / "cuda_benchmark"
 DEFAULT_BLOCKS = ["8x8", "16x8", "16x16", "32x8", "32x16", "32x32"]
 DEFAULT_VARIANTS = ["naive"]
+DEFAULT_ATAN_METHODS = ["exact"]
+IMAGE_EDGE_DIM = 28
 ALLOWED_VARIANTS = {
     "naive",
     "atan_approx",
     "shared",
     "shared_atan_approx",
+}
+ALLOWED_ATAN_METHODS = {
+    "exact",
+    "approx_1deg",
+    "approx_2deg",
+    "approx_5deg",
+    "approx_11deg",
+    "approx_15deg",
 }
 
 
@@ -53,6 +64,15 @@ def build_parser():
         help=(
             "CUDA kernel variants to run. Choices: naive, atan_approx, "
             "shared, shared_atan_approx"
+        ),
+    )
+    parser.add_argument(
+        "--atan-methods",
+        nargs="+",
+        default=DEFAULT_ATAN_METHODS,
+        help=(
+            "atan2 direction methods to run. Choices: exact, approx_1deg, "
+            "approx_2deg, approx_5deg, approx_11deg, approx_15deg"
         ),
     )
     parser.add_argument(
@@ -94,7 +114,18 @@ def build_parser():
         "--seed",
         type=int,
         default=0,
-        help="Random seed for generated input pixels",
+        help="Random seed for input image selection/generation",
+    )
+    parser.add_argument(
+        "--input-source",
+        choices=["fashion_mnist", "random"],
+        default="fashion_mnist",
+        help="Input generator for benchmark images. Default: fashion_mnist.",
+    )
+    parser.add_argument(
+        "--fashion-mnist-csv",
+        default=str(DEFAULT_FASHION_MNIST_CSV),
+        help="Fashion-MNIST CSV used when --input-source=fashion_mnist",
     )
     parser.add_argument(
         "--chunk-mb",
@@ -121,6 +152,11 @@ def build_parser():
         "--kernel-only",
         action="store_true",
         help="Skip device-to-host copies for pure kernel timing",
+    )
+    parser.add_argument(
+        "--measure-error",
+        action="store_true",
+        help="Ask sobel_cuda to report direction error against exact CPU atan2f",
     )
     return parser
 
@@ -159,6 +195,16 @@ def validate_variant(variant):
     return variant
 
 
+def validate_atan_method(method):
+    if method not in ALLOWED_ATAN_METHODS:
+        raise ValueError(
+            "Unknown atan method '{}'; choose from {}".format(
+                method, ", ".join(sorted(ALLOWED_ATAN_METHODS))
+            )
+        )
+    return method
+
+
 def ensure_cuda_binary(skip_build):
     if skip_build:
         if not CUDA_BINARY.exists():
@@ -174,10 +220,55 @@ def ensure_cuda_binary(skip_build):
     run_command(["cmake", "--build", CUDA_BUILD_DIR])
 
 
-def generate_input(path, width, height, seed, chunk_mb, force):
+def load_fashion_mnist_pixels(csv_path):
+    data = np.loadtxt(str(csv_path), delimiter=",", skiprows=1, dtype=np.uint8)
+    if data.ndim != 2 or data.shape[1] != 785:
+        raise ValueError(
+            "Expected Fashion-MNIST CSV with 785 columns (label + 784 pixels), "
+            "got shape {}".format(data.shape)
+        )
+    return data[:, 1:].reshape(data.shape[0], IMAGE_EDGE_DIM, IMAGE_EDGE_DIM)
+
+
+def generate_fashion_mnist_input(path, width, height, seed, csv_path, force):
     expected_bytes = width * height
     if path.exists() and path.stat().st_size == expected_bytes and not force:
-        print("Reusing existing input: {}".format(path))
+        print("Reusing existing Fashion-MNIST input: {}".format(path))
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    images = load_fashion_mnist_pixels(csv_path)
+    grid_rows = (height + IMAGE_EDGE_DIM - 1) // IMAGE_EDGE_DIM
+    grid_cols = (width + IMAGE_EDGE_DIM - 1) // IMAGE_EDGE_DIM
+    rng = np.random.default_rng(seed)
+    tile_indices = rng.integers(
+        0,
+        images.shape[0],
+        size=(grid_rows, grid_cols),
+        dtype=np.int32,
+    )
+
+    print(
+        "Generating {} bytes of stitched Fashion-MNIST input at {}".format(
+            expected_bytes, path
+        )
+    )
+    print("Fashion-MNIST source: {}".format(csv_path))
+    with path.open("wb") as handle:
+        for tile_row in range(grid_rows):
+            tiles = images[tile_indices[tile_row]]
+            for image_row in range(IMAGE_EDGE_DIM):
+                output_row = tile_row * IMAGE_EDGE_DIM + image_row
+                if output_row >= height:
+                    break
+                row = tiles[:, image_row, :].reshape(-1)[:width]
+                row.tofile(handle)
+
+
+def generate_random_input(path, width, height, seed, chunk_mb, force):
+    expected_bytes = width * height
+    if path.exists() and path.stat().st_size == expected_bytes and not force:
+        print("Reusing existing random input: {}".format(path))
         return
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -194,6 +285,22 @@ def generate_input(path, width, height, seed, chunk_mb, force):
             remaining -= n_values
 
 
+def generate_input(path, width, height, seed, chunk_mb, force, input_source, fashion_mnist_csv):
+    if input_source == "fashion_mnist":
+        generate_fashion_mnist_input(
+            path,
+            width,
+            height,
+            seed,
+            Path(fashion_mnist_csv).resolve(),
+            force,
+        )
+    elif input_source == "random":
+        generate_random_input(path, width, height, seed, chunk_mb, force)
+    else:
+        raise ValueError("Unknown input source: {}".format(input_source))
+
+
 def main():
     try:
         args = build_parser().parse_args()
@@ -207,21 +314,32 @@ def main():
         blocks = [validate_block(block) for block in args.blocks]
         fixed_block = validate_block(args.block)
         variants = [validate_variant(variant) for variant in args.variants]
+        atan_methods = [validate_atan_method(method) for method in args.atan_methods]
+        if args.kernel_only and args.measure_error:
+            raise ValueError("--measure-error cannot be combined with --kernel-only")
         gpu_counts = None
         if args.gpus is not None:
             gpu_counts = [validate_gpu_count(gpu_count) for gpu_count in args.gpus]
         output_dir = Path(args.output_dir).resolve()
-        stem = "{}_{}x{}".format(args.prefix, args.width, args.height)
+        stem = "{}_{}_{}x{}".format(
+            args.prefix, args.input_source, args.width, args.height
+        )
         input_dir = output_dir / "inputs"
         input_path = input_dir / (stem + ".img.bin")
         if gpu_counts is not None:
-            sweep_dir = "variant_strong_scaling" if len(variants) > 1 else "strong_scaling"
+            sweep_dir = (
+                "variant_strong_scaling"
+                if len(variants) > 1 or len(atan_methods) > 1
+                else "strong_scaling"
+            )
             experiment_dir = output_dir / "multi_gpu" / sweep_dir / "{}x{}".format(
                 args.width, args.height
             )
         else:
             sweep_dir = (
-                "variant_block_shape_sweep" if len(variants) > 1 else "block_shape_sweep"
+                "variant_block_shape_sweep"
+                if len(variants) > 1 or len(atan_methods) > 1
+                else "block_shape_sweep"
             )
             experiment_dir = output_dir / "single_gpu" / sweep_dir / "{}x{}".format(
                 args.width, args.height
@@ -245,58 +363,74 @@ def main():
             args.seed,
             args.chunk_mb,
             args.force_input,
+            args.input_source,
+            args.fashion_mnist_csv,
         )
 
         if gpu_counts is not None:
             for variant in variants:
-                for gpu_count in gpu_counts:
-                    output_path = experiment_dir / (
-                        "{}.{}gpu.{}.magdir.bin".format(variant, gpu_count, fixed_block)
-                    )
-                    cmd = [
-                        CUDA_BINARY,
-                        "--variant",
-                        variant,
-                        "--num-gpus",
-                        gpu_count,
-                        "--block",
-                        fixed_block,
-                        "--warmup",
-                        args.warmup,
-                        "--repeats",
-                        args.repeats,
-                        "--csv",
-                        csv_path,
-                        "--csv-append",
-                        "--no-output-write",
-                    ]
-                    if args.kernel_only:
-                        cmd.append("--skip-d2h")
-                    cmd.extend([input_path, output_path, args.width, args.height])
-                    run_command(cmd)
+                for atan_method in atan_methods:
+                    for gpu_count in gpu_counts:
+                        output_path = experiment_dir / (
+                            "{}.{}.{}gpu.{}.magdir.bin".format(
+                                variant, atan_method, gpu_count, fixed_block
+                            )
+                        )
+                        cmd = [
+                            CUDA_BINARY,
+                            "--variant",
+                            variant,
+                            "--atan-method",
+                            atan_method,
+                            "--num-gpus",
+                            gpu_count,
+                            "--block",
+                            fixed_block,
+                            "--warmup",
+                            args.warmup,
+                            "--repeats",
+                            args.repeats,
+                            "--csv",
+                            csv_path,
+                            "--csv-append",
+                            "--no-output-write",
+                        ]
+                        if args.kernel_only:
+                            cmd.append("--skip-d2h")
+                        if args.measure_error:
+                            cmd.append("--measure-error")
+                        cmd.extend([input_path, output_path, args.width, args.height])
+                        run_command(cmd)
         else:
             for variant in variants:
-                for block in blocks:
-                    output_path = experiment_dir / ("{}.{}.magdir.bin".format(variant, block))
-                    cmd = [
-                        CUDA_BINARY,
-                        "--variant",
-                        variant,
-                        "--block",
-                        block,
-                        "--warmup",
-                        args.warmup,
-                        "--repeats",
-                        args.repeats,
-                        "--csv",
-                        csv_path,
-                        "--csv-append",
-                        "--no-output-write",
-                    ]
-                    if args.kernel_only:
-                        cmd.append("--skip-d2h")
-                    cmd.extend([input_path, output_path, args.width, args.height])
-                    run_command(cmd)
+                for atan_method in atan_methods:
+                    for block in blocks:
+                        output_path = experiment_dir / (
+                            "{}.{}.{}.magdir.bin".format(variant, atan_method, block)
+                        )
+                        cmd = [
+                            CUDA_BINARY,
+                            "--variant",
+                            variant,
+                            "--atan-method",
+                            atan_method,
+                            "--block",
+                            block,
+                            "--warmup",
+                            args.warmup,
+                            "--repeats",
+                            args.repeats,
+                            "--csv",
+                            csv_path,
+                            "--csv-append",
+                            "--no-output-write",
+                        ]
+                        if args.kernel_only:
+                            cmd.append("--skip-d2h")
+                        if args.measure_error:
+                            cmd.append("--measure-error")
+                        cmd.extend([input_path, output_path, args.width, args.height])
+                        run_command(cmd)
 
         print("Wrote CUDA timing CSV: {}".format(csv_path))
         return 0

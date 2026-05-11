@@ -21,25 +21,79 @@ except ImportError:
 
 VARIANT_ORDER = [
     "naive",
+    "naive:exact",
+    "naive:approx_1deg",
+    "naive:approx_2deg",
+    "naive:approx_5deg",
+    "naive:approx_11deg",
+    "naive:approx_15deg",
     "atan_approx",
     "shared",
+    "shared:exact",
+    "shared:approx_1deg",
+    "shared:approx_2deg",
+    "shared:approx_5deg",
+    "shared:approx_11deg",
+    "shared:approx_15deg",
     "shared_atan_approx",
 ]
 
-NAIVE_VARIANTS = {"naive", "atan_approx"}
-SHARED_VARIANTS = {"shared", "shared_atan_approx"}
+NAIVE_VARIANTS = {
+    "naive",
+    "atan_approx",
+    "naive:exact",
+    "naive:approx_1deg",
+    "naive:approx_2deg",
+    "naive:approx_5deg",
+    "naive:approx_11deg",
+    "naive:approx_15deg",
+}
+SHARED_VARIANTS = {
+    "shared",
+    "shared_atan_approx",
+    "shared:exact",
+    "shared:approx_1deg",
+    "shared:approx_2deg",
+    "shared:approx_5deg",
+    "shared:approx_11deg",
+    "shared:approx_15deg",
+}
 
 VARIANT_LABELS = {
     "naive": "naive",
+    "naive:exact": "naive exact",
+    "naive:approx_1deg": "naive 1deg",
+    "naive:approx_2deg": "naive 2deg",
+    "naive:approx_5deg": "naive 5deg",
+    "naive:approx_11deg": "naive 11deg",
+    "naive:approx_15deg": "naive 15deg",
     "atan_approx": "atan approx",
     "shared": "shared",
+    "shared:exact": "shared exact",
+    "shared:approx_1deg": "shared 1deg",
+    "shared:approx_2deg": "shared 2deg",
+    "shared:approx_5deg": "shared 5deg",
+    "shared:approx_11deg": "shared 11deg",
+    "shared:approx_15deg": "shared 15deg",
     "shared_atan_approx": "shared + atan approx",
 }
 
 VARIANT_COLORS = {
     "naive": "#1f77b4",
+    "naive:exact": "#1f77b4",
+    "naive:approx_1deg": "#9467bd",
+    "naive:approx_2deg": "#ff7f0e",
+    "naive:approx_5deg": "#8c564b",
+    "naive:approx_11deg": "#e377c2",
+    "naive:approx_15deg": "#7f7f7f",
     "atan_approx": "#ff7f0e",
     "shared": "#2ca02c",
+    "shared:exact": "#2ca02c",
+    "shared:approx_1deg": "#17becf",
+    "shared:approx_2deg": "#d62728",
+    "shared:approx_5deg": "#bcbd22",
+    "shared:approx_11deg": "#aec7e8",
+    "shared:approx_15deg": "#ffbb78",
     "shared_atan_approx": "#d62728",
 }
 
@@ -132,13 +186,19 @@ def require_single_problem(rows):
     return widths.pop(), heights.pop()
 
 
+def row_variant(row):
+    if "implementation" in row and "atan_method" in row:
+        return "{}:{}".format(row["implementation"], row["atan_method"])
+    return row.get("variant", "naive")
+
+
 def summarize_best_variants(rows, flops_per_pixel):
     width, height = require_single_problem(rows)
     output_pixels = float((width - 2) * (height - 2))
 
     groups = defaultdict(list)
     for row in rows:
-        key = (row.get("variant", "naive"), int(row["block_x"]), int(row["block_y"]))
+        key = (row_variant(row), int(row["block_x"]), int(row["block_y"]))
         groups[key].append(float(row["kernel_ms"]))
 
     entries = []
