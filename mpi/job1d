@@ -1,0 +1,44 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -C cpu
+#SBATCH -q debug
+#SBATCH -J mpi1d
+#SBATCH --ntasks-per-node=128
+#SBATCH -t 00:30:00
+#SBATCH -o ./mpi_1d_out/mpi_1d_out.txt
+
+module load python
+module load conda
+conda activate base
+
+export OMP_NUM_THREADS=1
+
+runtest() {
+    local NAME=$1
+    local HEIGHT=$2
+    local WIDTH=$3
+    local PARALLELISM=$4
+
+    local IMG_BASE="${NAME}_${HEIGHT}_${WIDTH}"
+    local IMGNAME="${PSCRATCH}/data/${IMG_BASE}.img.bin"
+    local REFNAME="${PSCRATCH}/data/${IMG_BASE}.magdir.bin"
+
+    local OUTNAME="${PSCRATCH}/data/${IMG_BASE}_${PARALLELISM}_1d.magdir.bin"
+
+    echo "Running program with P=$PARALLELISM..." 
+    srun -N 1 -n "$PARALLELISM" ./build/sobel_mpi1d "$IMGNAME" "$OUTNAME" "$HEIGHT" "$WIDTH" | tee "./mpi_1d_out/test_mpi1d_${PARALLELISM}.txt"
+
+    echo "Running checker..." 
+    python ../python/check_output.py "$REFNAME" "$OUTNAME" "$HEIGHT" "$WIDTH"
+}
+
+runtest GB 32768 32768 1
+runtest GB 32768 32768 2
+runtest GB 32768 32768 4
+runtest GB 32768 32768 8
+runtest GB 32768 32768 16
+runtest GB 32768 32768 32
+runtest GB 32768 32768 64
+runtest GB 32768 32768 128
+
+

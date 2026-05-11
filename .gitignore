@@ -8,3 +8,5 @@
 data/
 data
 PRIVATE_DEMO_NOTES.md
+
+mpi/*_out/
