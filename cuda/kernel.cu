@@ -10,6 +10,53 @@
 
 #include "kernel.h"
 
+const char* cuda_kernel_variant_name(CudaKernelVariant variant) {
+    switch (variant) {
+        case CudaKernelVariant::NaiveExact:
+            return "naive";
+        case CudaKernelVariant::NaiveAtanApprox:
+            return "atan_approx";
+        case CudaKernelVariant::SharedExact:
+            return "shared";
+        case CudaKernelVariant::SharedAtanApprox:
+            return "shared_atan_approx";
+    }
+
+    return "unknown";
+}
+
+const char* cuda_kernel_implementation_name(CudaKernelVariant variant) {
+    switch (variant) {
+        case CudaKernelVariant::NaiveExact:
+        case CudaKernelVariant::NaiveAtanApprox:
+            return "naive";
+        case CudaKernelVariant::SharedExact:
+        case CudaKernelVariant::SharedAtanApprox:
+            return "shared";
+    }
+
+    return "unknown";
+}
+
+const char* cuda_atan_method_name(CudaAtanMethod method) {
+    switch (method) {
+        case CudaAtanMethod::Exact:
+            return "exact";
+        case CudaAtanMethod::Approx1Deg:
+            return "approx_1deg";
+        case CudaAtanMethod::Approx2Deg:
+            return "approx_2deg";
+        case CudaAtanMethod::Approx5Deg:
+            return "approx_5deg";
+        case CudaAtanMethod::Approx11Deg:
+            return "approx_11deg";
+        case CudaAtanMethod::Approx15Deg:
+            return "approx_15deg";
+    }
+
+    return "unknown";
+}
+
 namespace {
 
 __device__ __constant__ int kGx[9] = {
@@ -47,7 +94,86 @@ double elapsed_host_ms(
     return std::chrono::duration<double, std::milli>(stop - start).count();
 }
 
-__global__ void sobel_kernel(
+__device__ __forceinline__ float cuda_atan2_common(
+    float y,
+    float x,
+    float atan_abs_t
+) {
+    const float PI          = 3.14159265358979f;
+    const float PI_2        = 1.57079632679490f;
+
+    float p = atan_abs_t;
+    if (fabsf(y) > fabsf(x)) {
+        p = PI_2 - p;
+    }
+    if (x < 0.0f) {
+        p = PI - p;
+    }
+    return copysignf(p, y);
+}
+
+__device__ __forceinline__ float atan_poly_15(float t) {
+    float t2 = t * t;
+    float p = -0.0040540580f;
+    p = fmaf(p, t2, 0.0218612288f);
+    p = fmaf(p, t2, -0.0559098861f);
+    p = fmaf(p, t2, 0.0964200441f);
+    p = fmaf(p, t2, -0.1390853351f);
+    p = fmaf(p, t2, 0.1994653599f);
+    p = fmaf(p, t2, -0.3332985605f);
+    p = fmaf(p, t2, 0.9999993329f);
+    return p * t;
+}
+
+__device__ __forceinline__ float atan_poly_11(float t) {
+    float t2 = t * t;
+    float p = -0.01172120f;
+    p = fmaf(p, t2, 0.05265332f);
+    p = fmaf(p, t2, -0.11643287f);
+    p = fmaf(p, t2, 0.19354346f);
+    p = fmaf(p, t2, -0.33262347f);
+    p = fmaf(p, t2, 0.99997726f);
+    return p * t;
+}
+
+__device__ __forceinline__ float atan_poly_5(float t) {
+    float t2 = t * t;
+    float p = 0.079331f;
+    p = fmaf(p, t2, -0.288679f);
+    p = fmaf(p, t2, 0.995354f);
+    return p * t;
+}
+
+template <CudaAtanMethod Method>
+__device__ __forceinline__ float sobel_direction(float sum_y, float sum_x) {
+    if constexpr (Method == CudaAtanMethod::Exact) {
+        return atan2f(sum_y, sum_x);
+    } else {
+        float ax = fabsf(sum_x);
+        float ay = fabsf(sum_y);
+        bool swap = (ay > ax);
+        float t_num = swap ? ax : ay;
+        float t_den = swap ? ay : ax;
+        float t = (t_den != 0.0f) ? (t_num / t_den) : 0.0f;
+
+        float p = 0.0f;
+        if constexpr (Method == CudaAtanMethod::Approx1Deg) {
+            p = t * 0.7853981634f;
+        } else if constexpr (Method == CudaAtanMethod::Approx2Deg) {
+            p = t * fmaf(-0.273f, t, 0.7853981634f + 0.273f);
+        } else if constexpr (Method == CudaAtanMethod::Approx5Deg) {
+            p = atan_poly_5(t);
+        } else if constexpr (Method == CudaAtanMethod::Approx11Deg) {
+            p = atan_poly_11(t);
+        } else if constexpr (Method == CudaAtanMethod::Approx15Deg) {
+            p = atan_poly_15(t);
+        }
+        return cuda_atan2_common(sum_y, sum_x, p);
+    }
+}
+
+template <CudaAtanMethod Method>
+__global__ void sobel_kernel_naive(
     const uint8_t* input,
     int width,
     int height,
@@ -70,7 +196,9 @@ __global__ void sobel_kernel(
     float sum_y = 0.0f;
 
     // Each thread computes one output pixel from its surrounding 3x3 patch.
+    #pragma unroll
     for (int ky = -1; ky <= 1; ++ky) {
+        #pragma unroll
         for (int kx = -1; kx <= 1; ++kx) {
             const int kernel_index = (ky + 1) * 3 + (kx + 1);
             const uint8_t pixel = input[(y + ky) * width + (x + kx)];
@@ -81,7 +209,139 @@ __global__ void sobel_kernel(
 
     const int output_index = out_y * out_width + out_x;
     magnitude[output_index] = sqrtf(sum_x * sum_x + sum_y * sum_y);
-    direction[output_index] = atan2f(sum_y, sum_x);
+    direction[output_index] = sobel_direction<Method>(sum_y, sum_x);
+}
+
+template <CudaAtanMethod Method>
+__global__ void sobel_kernel_shared(
+    const uint8_t* input,
+    int width,
+    int height,
+    float* magnitude,
+    float* direction
+) {
+    const int out_x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int out_y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int out_width = width - 2;
+    const int out_height = height - 2;
+
+    const int tile_width = static_cast<int>(blockDim.x) + 2;
+    const int tile_height = static_cast<int>(blockDim.y) + 2;
+    const int tile_elements = tile_width * tile_height;
+    const int thread_linear =
+        static_cast<int>(threadIdx.y * blockDim.x + threadIdx.x);
+    const int thread_count = static_cast<int>(blockDim.x * blockDim.y);
+    const int block_input_x = static_cast<int>(blockIdx.x * blockDim.x);
+    const int block_input_y = static_cast<int>(blockIdx.y * blockDim.y);
+
+    extern __shared__ uint8_t tile[];
+
+    for (int idx = thread_linear; idx < tile_elements; idx += thread_count) {
+        const int tile_y = idx / tile_width;
+        const int tile_x = idx % tile_width;
+        const int global_x = block_input_x + tile_x;
+        const int global_y = block_input_y + tile_y;
+
+        uint8_t pixel = 0;
+        if (global_x < width && global_y < height) {
+            pixel = input[global_y * width + global_x];
+        }
+        tile[idx] = pixel;
+    }
+
+    __syncthreads();
+
+    if (out_x >= out_width || out_y >= out_height) {
+        return;
+    }
+
+    const int shared_x = static_cast<int>(threadIdx.x) + 1;
+    const int shared_y = static_cast<int>(threadIdx.y) + 1;
+
+    float sum_x = 0.0f;
+    float sum_y = 0.0f;
+
+    #pragma unroll
+    for (int ky = -1; ky <= 1; ++ky) {
+        #pragma unroll
+        for (int kx = -1; kx <= 1; ++kx) {
+            const int kernel_index = (ky + 1) * 3 + (kx + 1);
+            const uint8_t pixel = tile[(shared_y + ky) * tile_width + (shared_x + kx)];
+            sum_x += static_cast<float>(pixel) * static_cast<float>(kGx[kernel_index]);
+            sum_y += static_cast<float>(pixel) * static_cast<float>(kGy[kernel_index]);
+        }
+    }
+
+    const int output_index = out_y * out_width + out_x;
+    magnitude[output_index] = sqrtf(sum_x * sum_x + sum_y * sum_y);
+    direction[output_index] = sobel_direction<Method>(sum_y, sum_x);
+}
+
+bool variant_uses_shared_memory(CudaKernelVariant variant) {
+    return variant == CudaKernelVariant::SharedExact
+        || variant == CudaKernelVariant::SharedAtanApprox;
+}
+
+size_t shared_memory_bytes_for_variant(const CudaLaunchConfig& launch_config) {
+    if (!variant_uses_shared_memory(launch_config.variant)) {
+        return 0;
+    }
+
+    return static_cast<size_t>(launch_config.block_x + 2)
+        * static_cast<size_t>(launch_config.block_y + 2)
+        * sizeof(uint8_t);
+}
+
+void launch_sobel_kernel(
+    const uint8_t* input,
+    int width,
+    int height,
+    float* magnitude,
+    float* direction,
+    const dim3& grid,
+    const dim3& block,
+    cudaStream_t stream,
+    const CudaLaunchConfig& launch_config
+) {
+    const size_t shared_bytes = shared_memory_bytes_for_variant(launch_config);
+    const bool use_shared = variant_uses_shared_memory(launch_config.variant);
+
+#define LAUNCH_WITH_METHOD(method) \
+    do { \
+        if (use_shared) { \
+            sobel_kernel_shared<method><<<grid, block, shared_bytes, stream>>>( \
+                input, width, height, magnitude, direction \
+            ); \
+        } else { \
+            sobel_kernel_naive<method><<<grid, block, 0, stream>>>( \
+                input, width, height, magnitude, direction \
+            ); \
+        } \
+    } while (false)
+
+    switch (launch_config.atan_method) {
+        case CudaAtanMethod::Exact:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Exact);
+            break;
+        case CudaAtanMethod::Approx1Deg:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Approx1Deg);
+            break;
+        case CudaAtanMethod::Approx2Deg:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Approx2Deg);
+            break;
+        case CudaAtanMethod::Approx5Deg:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Approx5Deg);
+            break;
+        case CudaAtanMethod::Approx11Deg:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Approx11Deg);
+            break;
+        case CudaAtanMethod::Approx15Deg:
+            LAUNCH_WITH_METHOD(CudaAtanMethod::Approx15Deg);
+            break;
+    }
+
+#undef LAUNCH_WITH_METHOD
+    check_cuda(cudaGetLastError(), "sobel kernel launch");
 }
 
 struct DeviceWork {
@@ -176,6 +436,8 @@ CudaTimingBreakdown compute_sobel_cuda_multi_gpu_impl(
     );
 
     CudaTimingBreakdown timing;
+    timing.variant = launch_config.variant;
+    timing.atan_method = launch_config.atan_method;
     timing.num_gpus = active_gpus;
     timing.block_x = launch_config.block_x;
     timing.block_y = launch_config.block_y;
@@ -258,14 +520,17 @@ CudaTimingBreakdown compute_sobel_cuda_multi_gpu_impl(
                 static_cast<unsigned int>(work.grid_x),
                 static_cast<unsigned int>(work.grid_y)
             );
-            sobel_kernel<<<grid, block, 0, work.stream>>>(
+            launch_sobel_kernel(
                 work.d_input,
                 width,
                 work.local_input_rows,
                 work.d_magnitude,
-                work.d_direction
+                work.d_direction,
+                grid,
+                block,
+                work.stream,
+                launch_config
             );
-            check_cuda(cudaGetLastError(), "sobel_kernel multi launch");
         }
         for (DeviceWork& work : works) {
             check_cuda(cudaSetDevice(work.device), "cudaSetDevice(multi kernel sync)");
@@ -361,6 +626,8 @@ CudaTimingBreakdown compute_sobel_cuda(
     }
 
     CudaTimingBreakdown timing;
+    timing.variant = launch_config.variant;
+    timing.atan_method = launch_config.atan_method;
     timing.num_gpus = 1;
     timing.block_x = launch_config.block_x;
     timing.block_y = launch_config.block_y;
@@ -424,8 +691,17 @@ CudaTimingBreakdown compute_sobel_cuda(
             cudaEventRecord(kernel_start),
             "cudaEventRecord(kernel_start)"
         );
-        sobel_kernel<<<grid, block>>>(d_input, width, height, d_magnitude, d_direction);
-        check_cuda(cudaGetLastError(), "sobel_kernel launch");
+        launch_sobel_kernel(
+            d_input,
+            width,
+            height,
+            d_magnitude,
+            d_direction,
+            grid,
+            block,
+            nullptr,
+            launch_config
+        );
         check_cuda(cudaEventRecord(kernel_stop), "cudaEventRecord(kernel_stop)");
         check_cuda(cudaEventSynchronize(kernel_stop), "cudaEventSynchronize(kernel_stop)");
         timing.kernel_ms = elapsed_event_ms(kernel_start, kernel_stop);

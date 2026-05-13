@@ -26,12 +26,36 @@ TIMING_FIELDS = [
     "cuda_section_ms",
 ]
 
+VARIANT_ORDER = [
+    "naive",
+    "naive:exact",
+    "naive:approx_1deg",
+    "naive:approx_2deg",
+    "naive:approx_5deg",
+    "naive:approx_11deg",
+    "naive:approx_15deg",
+    "atan_approx",
+    "shared",
+    "shared:exact",
+    "shared:approx_1deg",
+    "shared:approx_2deg",
+    "shared:approx_5deg",
+    "shared:approx_11deg",
+    "shared:approx_15deg",
+    "shared_atan_approx",
+]
+
 
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Generate CUDA scaling and time-breakdown plots from a timing CSV."
     )
     parser.add_argument("csv_path", help="CSV produced by cuda_profile_sweep.py")
+    parser.add_argument(
+        "--variant",
+        default=None,
+        help="Plot one CUDA variant only; defaults to all variants present in the CSV",
+    )
     parser.add_argument(
         "--out-dir",
         default=None,
@@ -60,6 +84,29 @@ def read_rows(path):
     return rows
 
 
+def row_variant(row):
+    if "implementation" in row and "atan_method" in row:
+        return "{}:{}".format(row["implementation"], row["atan_method"])
+    return row.get("variant", "naive")
+
+
+def variant_sort_key(variant):
+    try:
+        return (0, VARIANT_ORDER.index(variant))
+    except ValueError:
+        return (1, variant)
+
+
+def split_rows_by_variant(rows):
+    groups = defaultdict(list)
+    for row in rows:
+        groups[row_variant(row)].append(row)
+    return {
+        variant: groups[variant]
+        for variant in sorted(groups, key=variant_sort_key)
+    }
+
+
 def summarize(rows):
     has_num_gpus = "num_gpus" in rows[0]
     distinct_gpus = set()
@@ -85,6 +132,7 @@ def summarize(rows):
             num_gpus = int(group_rows[0].get("num_gpus", 1))
             label = "{}x{}".format(block_x, block_y)
         entry = {
+            "variant": row_variant(group_rows[0]),
             "num_gpus": num_gpus,
             "block_x": block_x,
             "block_y": block_y,
@@ -208,6 +256,89 @@ def plot_speedup(summaries, out_path):
     ax.set_title("CUDA Sobel Multi-GPU Speedup")
     ax.grid(axis="y", alpha=0.3)
     ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=220)
+    plt.close(fig)
+    return True
+
+
+def plot_variant_comparison(variant_summaries, out_path):
+    labels = [item["label"] for item in next(iter(variant_summaries.values()))]
+    x_positions = list(range(len(labels)))
+    variants = list(variant_summaries.keys())
+    group_width = 0.82
+    bar_width = group_width / float(max(1, len(variants)))
+
+    fig, ax = plt.subplots(figsize=(10.6, 5.4))
+    for variant_index, (variant, summaries) in enumerate(variant_summaries.items()):
+        by_label = {item["label"]: item["kernel_ms"] for item in summaries}
+        kernel_ms = [by_label[label] for label in labels]
+        offsets = [
+            x - group_width / 2.0 + bar_width * (variant_index + 0.5)
+            for x in x_positions
+        ]
+        ax.bar(
+            offsets,
+            kernel_ms,
+            width=bar_width * 0.92,
+            label=variant,
+        )
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(labels)
+    ax.set_xlabel("CUDA block shape")
+    ax.set_ylabel("Average kernel time (ms)")
+    ax.set_title("CUDA Sobel Variant Comparison")
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(frameon=False, ncol=2, fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=220)
+    plt.close(fig)
+
+
+def plot_block_sensitivity_focus(variant_summaries, out_path):
+    selected_variants = [
+        "naive:exact",
+        "naive:approx_2deg",
+        "shared:exact",
+        "shared:approx_2deg",
+    ]
+    selected_variants = [
+        variant for variant in selected_variants if variant in variant_summaries
+    ]
+    if not selected_variants:
+        return False
+
+    labels = [item["label"] for item in variant_summaries[selected_variants[0]]]
+    x_positions = list(range(len(labels)))
+    markers = {
+        "naive:exact": "o",
+        "naive:approx_2deg": "s",
+        "shared:exact": "^",
+        "shared:approx_2deg": "D",
+    }
+
+    fig, ax = plt.subplots(figsize=(8.8, 4.9))
+    for variant in selected_variants:
+        summaries = variant_summaries[variant]
+        by_label = {item["label"]: item["kernel_ms"] for item in summaries}
+        kernel_ms = [by_label[label] for label in labels]
+        ax.scatter(
+            x_positions,
+            kernel_ms,
+            s=78,
+            marker=markers.get(variant, "o"),
+            label=variant,
+            zorder=3,
+        )
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(labels)
+    ax.set_xlabel("CUDA block shape")
+    ax.set_ylabel("Average kernel time (ms)")
+    ax.set_title("CUDA Sobel Block-Size Sensitivity")
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(frameon=False, ncol=2, fontsize=9)
     fig.tight_layout()
     fig.savefig(out_path, dpi=220)
     plt.close(fig)
@@ -424,24 +555,49 @@ def main():
             plot_format = "svg"
 
         rows = read_rows(csv_path)
-        summaries = summarize(rows)
-        scaling_path = out_dir / (prefix + ".cuda_scaling." + plot_format)
-        breakdown_path = out_dir / (prefix + ".cuda_breakdown." + plot_format)
-        speedup_path = out_dir / (prefix + ".cuda_speedup." + plot_format)
+        rows_by_variant = split_rows_by_variant(rows)
 
-        if plot_format == "png":
-            plot_scaling(summaries, scaling_path)
-            plot_breakdown(summaries, breakdown_path)
-            wrote_speedup = plot_speedup(summaries, speedup_path)
-        else:
-            plot_scaling_svg(summaries, scaling_path)
-            plot_breakdown_svg(summaries, breakdown_path)
-            wrote_speedup = False
+        if args.variant is not None:
+            if args.variant not in rows_by_variant:
+                raise ValueError(
+                    "Variant '{}' is not present in {}".format(args.variant, csv_path)
+                )
+            rows_by_variant = {args.variant: rows_by_variant[args.variant]}
 
-        print("Wrote {}".format(scaling_path))
-        print("Wrote {}".format(breakdown_path))
-        if wrote_speedup:
-            print("Wrote {}".format(speedup_path))
+        variant_summaries = {}
+        for variant, variant_rows in rows_by_variant.items():
+            summaries = summarize(variant_rows)
+            variant_summaries[variant] = summaries
+            variant_prefix = prefix if len(rows_by_variant) == 1 else prefix + "." + variant
+            scaling_path = out_dir / (variant_prefix + ".cuda_scaling." + plot_format)
+            breakdown_path = out_dir / (variant_prefix + ".cuda_breakdown." + plot_format)
+            speedup_path = out_dir / (variant_prefix + ".cuda_speedup." + plot_format)
+
+            if plot_format == "png":
+                plot_scaling(summaries, scaling_path)
+                plot_breakdown(summaries, breakdown_path)
+                wrote_speedup = plot_speedup(summaries, speedup_path)
+            else:
+                plot_scaling_svg(summaries, scaling_path)
+                plot_breakdown_svg(summaries, breakdown_path)
+                wrote_speedup = False
+
+            print("Wrote {}".format(scaling_path))
+            print("Wrote {}".format(breakdown_path))
+            if wrote_speedup:
+                print("Wrote {}".format(speedup_path))
+
+        if (
+            plot_format == "png"
+            and len(variant_summaries) > 1
+            and not any(is_multi_gpu_summary(summaries) for summaries in variant_summaries.values())
+        ):
+            comparison_path = out_dir / (prefix + ".cuda_variant_comparison." + plot_format)
+            plot_variant_comparison(variant_summaries, comparison_path)
+            print("Wrote {}".format(comparison_path))
+            block_focus_path = out_dir / (prefix + ".cuda_block_sensitivity_focus." + plot_format)
+            if plot_block_sensitivity_focus(variant_summaries, block_focus_path):
+                print("Wrote {}".format(block_focus_path))
         return 0
     except Exception as exc:
         print("Error: {}".format(exc), file=sys.stderr)

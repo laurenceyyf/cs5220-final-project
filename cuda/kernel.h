@@ -2,7 +2,25 @@
 
 #include <cstdint>
 
+enum class CudaKernelVariant {
+    NaiveExact = 0,
+    NaiveAtanApprox,
+    SharedExact,
+    SharedAtanApprox,
+};
+
+enum class CudaAtanMethod {
+    Exact = 0,
+    Approx1Deg,
+    Approx2Deg,
+    Approx5Deg,
+    Approx11Deg,
+    Approx15Deg,
+};
+
 struct CudaTimingBreakdown {
+    CudaKernelVariant variant = CudaKernelVariant::NaiveExact;
+    CudaAtanMethod atan_method = CudaAtanMethod::Exact;
     int num_gpus = 1;
     int block_x = 0;
     int block_y = 0;
@@ -22,7 +40,13 @@ struct CudaLaunchConfig {
     int num_gpus = 1;
     bool use_multi_gpu = false;
     bool copy_output_to_host = true;
+    CudaKernelVariant variant = CudaKernelVariant::NaiveExact;
+    CudaAtanMethod atan_method = CudaAtanMethod::Exact;
 };
+
+const char* cuda_kernel_variant_name(CudaKernelVariant variant);
+const char* cuda_kernel_implementation_name(CudaKernelVariant variant);
+const char* cuda_atan_method_name(CudaAtanMethod method);
 
 CudaTimingBreakdown compute_sobel_cuda(
     const uint8_t* input,

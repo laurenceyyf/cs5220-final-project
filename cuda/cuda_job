@@ -1,0 +1,77 @@
+#!/bin/bash
+#SBATCH --job-name=sobel_benchmark
+#SBATCH --account=m4341          # <-- fill in your account/project
+#SBATCH --constraint=gpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=00:10:00
+#SBATCH --output=./cuda_out/sobel_benchmark_rajan_%j.out
+
+set -euo pipefail
+
+module load python
+module load conda
+conda activate nersc-python
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+WIDTH=32768
+HEIGHT=32768
+CSV_PATH="${SCRIPT_DIR}/cuda_out/sobel_timing_rajan_${SLURM_JOB_ID}.csv"
+OUTPUT_DIR="${PSCRATCH}/data/cuda_benchmark"
+VARIANTS=("naive" "shared")
+ATAN_METHODS=("exact" "approx_1deg" "approx_2deg" "approx_15deg")
+BLOCK_CONFIGS=("8x8" "16x16" "32x8" "32x16")
+WARMUP=1
+REPEATS=5
+# Large performance runs should avoid CPU-side full-image error scans.
+# Submit with MEASURE_ERROR=1 for smaller accuracy sweeps if needed.
+MEASURE_ERROR="${MEASURE_ERROR:-0}"
+
+mkdir -p "$(dirname "${CSV_PATH}")"
+
+EXTRA_ARGS=()
+if [[ "${MEASURE_ERROR}" == "1" ]]; then
+    EXTRA_ARGS+=(--measure-error)
+fi
+
+echo "========================================"
+echo "Sobel CUDA Benchmark - Perlmutter"
+echo "Job ID:       ${SLURM_JOB_ID}"
+echo "Image:        ${WIDTH}x${HEIGHT}"
+echo "Input source: Fashion-MNIST stitched tiles"
+echo "Output dir:   ${OUTPUT_DIR}"
+echo "CSV:          ${CSV_PATH}"
+echo "Variants:     ${VARIANTS[*]}"
+echo "atan2:        ${ATAN_METHODS[*]}"
+echo "Blocks:       ${BLOCK_CONFIGS[*]}"
+echo "Warmup:       ${WARMUP}"
+echo "Repeats:      ${REPEATS} per block config"
+echo "Error:        ${MEASURE_ERROR}"
+echo "GPUs:         1"
+echo "========================================"
+
+cd "${REPO_ROOT}"
+
+python3 tools/cuda_profile_sweep.py \
+    --width "${WIDTH}" \
+    --height "${HEIGHT}" \
+    --prefix fashion_mnist_sobel \
+    --input-source fashion_mnist \
+    --variants "${VARIANTS[@]}" \
+    --atan-methods "${ATAN_METHODS[@]}" \
+    --blocks "${BLOCK_CONFIGS[@]}" \
+    --repeats "${REPEATS}" \
+    --warmup "${WARMUP}" \
+    --output-dir "${OUTPUT_DIR}" \
+    --csv "${CSV_PATH}" \
+    --skip-build \
+    "${EXTRA_ARGS[@]}"
+
+echo ""
+echo "========================================"
+echo "Benchmark complete. Timing CSV: ${CSV_PATH}"
+echo "========================================"

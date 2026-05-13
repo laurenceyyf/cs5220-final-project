@@ -104,8 +104,8 @@ cuda/build/sobel_cuda \
   4096
 ```
 
-Use the sweep helper to generate a deterministic grayscale input, run several
-CUDA block shapes, and write one CSV for plotting:
+Use the sweep helper to generate a deterministic stitched Fashion-MNIST
+grayscale input, run several CUDA block shapes, and write one CSV for plotting:
 
 ```bash
 python3 tools/cuda_profile_sweep.py \
@@ -114,6 +114,29 @@ python3 tools/cuda_profile_sweep.py \
   --repeats 5 \
   --warmup 1
 ```
+
+The benchmark input defaults to `--input-source fashion_mnist`, using
+`python/fashion-mnist_test.csv` and the selected `--seed` to tile 28x28 examples
+into the requested image size. For synthetic stress tests, pass
+`--input-source random`.
+
+To compare global-memory and shared-memory kernels across exact and approximate
+direction calculations, use `--variants` and `--atan-methods`:
+
+```bash
+python3 tools/cuda_profile_sweep.py \
+  --width 4096 \
+  --height 4096 \
+  --variants naive shared \
+  --atan-methods exact approx_1deg approx_2deg approx_15deg \
+  --blocks 8x8 16x16 32x8 32x16 \
+  --repeats 5 \
+  --warmup 1 \
+  --measure-error
+```
+
+The CUDA CSV includes per-run `h2d_ms`, `kernel_ms`, `d2h_ms`, `total_ms`,
+`implementation`, `atan_method`, `mean_error_deg`, and `max_error_deg` columns.
 
 For pure kernel timing, add `--kernel-only`; otherwise the CSV includes H2D,
 kernel, and D2H timing. Plot the CSV with:
