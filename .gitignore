@@ -10,3 +10,4 @@ data
 
 mpi/*_out/
 cuda/*out/
+PRIVATE_DEMO_NOTES.md
